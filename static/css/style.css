@@ -283,3 +283,17 @@ kbd {
 .link-btn:hover { text-decoration: underline; }
 select.flash { animation: flash .9s ease-out; }
 @keyframes flash { from { background: var(--warning-soft); border-color: var(--warning); } }
+
+/* ---------- confirmation dialog */
+#confirm-modal { z-index: 60; }
+.modal.confirm { max-width: 440px; }
+.confirm-body { display: flex; gap: 14px; align-items: flex-start; }
+.confirm-body h2 { margin-bottom: 6px; }
+.confirm-body p { margin: 0 0 6px; line-height: 1.5; }
+.confirm-icon {
+  flex-shrink: 0; width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center;
+  font-weight: 700; font-size: 18px; background: var(--primary-soft); color: var(--primary);
+}
+.confirm-icon.danger { background: var(--danger-soft); color: var(--danger); }
+.btn-danger-solid { background: var(--danger); border-color: var(--danger); color: #fff; }
+.btn-danger-solid:hover { background: #991b1b; }

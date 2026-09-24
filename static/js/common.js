@@ -86,14 +86,64 @@ function closeModal(id) { document.getElementById(id).classList.add("hidden"); }
 document.addEventListener("click", (e) => {
   const closer = e.target.closest("[data-close]");
   if (closer) closeModal(closer.dataset.close);
-  if (e.target.classList.contains("modal-backdrop")) e.target.classList.add("hidden");
+  if (e.target.classList.contains("modal-backdrop") && e.target.id !== "confirm-modal") e.target.classList.add("hidden");
 });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") document.querySelectorAll(".modal-backdrop:not(.hidden)").forEach((m) => m.classList.add("hidden"));
+  if (e.key === "Escape") document.querySelectorAll(".modal-backdrop:not(.hidden):not(#confirm-modal)").forEach((m) => m.classList.add("hidden"));
 });
 
-function confirmDialog(message) {
-  return Promise.resolve(window.confirm(message));
+/* In-page confirmation dialog (replaces window.confirm). Resolves true on confirm, false otherwise.
+   options: {title, detail, confirmText, cancelText, danger}
+   Only one can be open: opening another cancels the earlier one, so one click never answers two. */
+let closeConfirm = null;
+function confirmDialog(message, options = {}) {
+  if (closeConfirm) closeConfirm(false);
+  const modal = document.getElementById("confirm-modal");
+  const ok = document.getElementById("confirm-ok");
+  const cancel = document.getElementById("confirm-cancel");
+  const danger = !!options.danger;
+  document.getElementById("confirm-title").textContent = options.title || "Are you sure?";
+  document.getElementById("confirm-message").textContent = message;
+  const detail = document.getElementById("confirm-detail");
+  detail.textContent = options.detail || "";
+  detail.classList.toggle("hidden", !options.detail);
+  document.getElementById("confirm-icon").className = `confirm-icon ${danger ? "danger" : ""}`;
+  ok.textContent = options.confirmText || "OK";
+  ok.className = `btn ${danger ? "btn-danger-solid" : "btn-primary"}`;
+  cancel.textContent = options.cancelText || "Cancel";
+
+  const returnFocus = document.activeElement;
+  modal.classList.remove("hidden");
+  ok.focus();
+
+  return new Promise((resolve) => {
+    const finish = (result) => {
+      closeConfirm = null;
+      modal.classList.add("hidden");
+      ok.removeEventListener("click", onOk);
+      cancel.removeEventListener("click", onCancel);
+      modal.removeEventListener("click", onBackdrop);
+      document.removeEventListener("keydown", onKey, true);
+      if (returnFocus && document.contains(returnFocus)) returnFocus.focus();
+      resolve(result);
+    };
+    const onOk = () => finish(true);
+    const onCancel = () => finish(false);
+    const onBackdrop = (e) => { if (e.target === modal) finish(false); };
+    const onKey = (e) => {
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); finish(false); }
+      if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); finish(document.activeElement !== cancel); }
+      if (e.key === "Tab") { // keep focus inside the dialog
+        e.preventDefault();
+        (document.activeElement === ok ? cancel : ok).focus();
+      }
+    };
+    closeConfirm = finish;
+    ok.addEventListener("click", onOk);
+    cancel.addEventListener("click", onCancel);
+    modal.addEventListener("click", onBackdrop);
+    document.addEventListener("keydown", onKey, true);
+  });
 }
 
 /* Fill a <select> with companies open in Tally (falls back to companies with cached ledgers). */

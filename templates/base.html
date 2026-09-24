@@ -52,6 +52,23 @@
     </div>
   </div>
 
+  <div class="modal-backdrop hidden" id="confirm-modal">
+    <div class="modal confirm" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-message">
+      <div class="modal-body confirm-body">
+        <div class="confirm-icon" id="confirm-icon" aria-hidden="true">!</div>
+        <div>
+          <h2 id="confirm-title">Are you sure?</h2>
+          <p id="confirm-message"></p>
+          <p class="muted small" id="confirm-detail"></p>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn" id="confirm-cancel">Cancel</button>
+        <button type="button" class="btn btn-primary" id="confirm-ok">OK</button>
+      </div>
+    </div>
+  </div>
+
   <script src="{{ url_for('static', filename='js/common.js') }}"></script>
   {% block scripts %}{% endblock %}
 </body>

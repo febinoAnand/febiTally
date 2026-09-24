@@ -339,7 +339,10 @@
       openImport(Number(openId)).catch((err) => toast(err.message, "error"));
     }
     if (delId) {
-      if (!(await confirmDialog(`Delete import #${delId} and its entries from FebiTally?\nVouchers already pushed stay in Tally.`))) return;
+      if (!(await confirmDialog(`Delete import #${delId} and all its entries from FebiTally?`, {
+        title: "Delete import", detail: "Vouchers already pushed to Tally stay in Tally.",
+        confirmText: "Delete import", danger: true,
+      }))) return;
       withButton(e.target, async () => {
         await api("DELETE", `/api/imports/${delId}`);
         toast("Import deleted.", "success");
@@ -671,7 +674,11 @@
         await patchEntry(d.restore, { status: "pending" });
         renderReview();
       } else if (d.del) {
-        if (!(await confirmDialog("Delete this entry from the import?"))) return;
+        const en = entryById(d.del);
+        if (!(await confirmDialog(`Delete the ${fmtDate(en.txn_date)} entry “${en.narration}” (${money(en.debit || en.credit)}) from this import?`, {
+          title: "Delete entry", detail: "The statement line is removed from FebiTally only.",
+          confirmText: "Delete entry", danger: true,
+        }))) return;
         await api("DELETE", `/api/imports/${current.import.id}/entries/${d.del}`);
         selected.delete(Number(d.del));
         await reloadImport();
@@ -738,7 +745,13 @@
 
   $("push-btn").addEventListener("click", async () => {
     const n = current.entries.filter((e) => e.status === "validated" || e.status === "failed").length;
-    if (!(await confirmDialog(`Create ${n} voucher(s) in Tally Prime for ${current.import.company}?`))) return;
+    const counts = ["Payment", "Receipt", "Contra"]
+      .map((t) => [t, current.entries.filter((e) => (e.status === "validated" || e.status === "failed") && e.voucher_type === t).length])
+      .filter(([, c]) => c).map(([t, c]) => `${c} ${t}`).join(", ");
+    if (!(await confirmDialog(`Create ${n} voucher${n === 1 ? "" : "s"} in Tally Prime for ${current.import.company}?`, {
+      title: "Push to Tally", detail: `${counts} · bank ledger ${current.import.bank_ledger}`,
+      confirmText: `Push ${n} voucher${n === 1 ? "" : "s"}`,
+    }))) return;
     withButton($("push-btn"), async () => {
       try {
         const r = await api("POST", `/api/imports/${current.import.id}/push`, {});

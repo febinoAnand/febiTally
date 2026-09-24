@@ -97,7 +97,10 @@
     if (editId) openForm(ledgers.find((l) => String(l.id) === editId));
     if (delId) {
       const l = ledgers.find((x) => String(x.id) === delId);
-      if (!(await confirmDialog(`Delete ledger "${l.name}" from Tally Prime?\nTally refuses if the ledger has vouchers.`))) return;
+      if (!(await confirmDialog(`Delete ledger “${l.name}” from Tally Prime?`, {
+        title: "Delete ledger", detail: "Tally refuses to delete a ledger that has vouchers.",
+        confirmText: "Delete from Tally", danger: true,
+      }))) return;
       withButton(e.target, async () => {
         const r = await api("DELETE", `/api/ledgers/${l.id}`);
         toast(r.message, "success");
