@@ -106,6 +106,40 @@ def make_encrypted_excel(path, password="secret"):
     return path
 
 
+def make_disguised_xls(path, kind):
+    """Files banks send with an .xls name that are really something else:
+    'xlsx' (a modern workbook), 'html' (an HTML table), 'xml2003' (Excel 2003 XML), 'tsv' (text)."""
+    header = ["Txn Date", "Description", "Ref No", "Txn Amount", "Balance"]
+    rows = [["07/04/2026", "SMS CHARGES", "0", "\u20b9\u00a02.12 Dr", "\u20b9\u00a01,191.12"],
+            ["01/07/2026", "INTEREST ON SB A/C", " ", "\u20b9\u00a07.00 Cr", "\u20b9\u00a01,198.12"]]
+    letterhead = [["CASA Statement"], ["Customer Name", "A KUMAR"], []]
+    summary = [[], ["Opening Balance", "Debit Count", "Total Debits", "Credit Count", "Total Credits"],
+               ["\u20b9\u00a01,193.24", "1", "\u20b9\u00a02.12", "1", "\u20b9\u00a07.00"]]
+    all_rows = letterhead + [header] + rows + summary
+    if kind == "xlsx":
+        wb = openpyxl.Workbook()
+        for r in all_rows:
+            wb.active.append(r)
+        wb.save(path)  # openpyxl writes xlsx content whatever the extension
+    elif kind == "html":
+        cells = lambda r, tag: "".join("<%s>%s</%s>" % (tag, c, tag) for c in r)
+        body = "".join("<tr>%s</tr>" % cells(r, "th" if r is header else "td") for r in all_rows)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("<html><head><style>td{mso-number-format:'\\@'}</style></head><body>"
+                    "<table border=1>%s</table></body></html>" % body)
+    elif kind == "xml2003":
+        def row_xml(r):
+            return "<Row>%s</Row>" % "".join('<Cell><Data ss:Type="String">%s</Data></Cell>' % c for c in r)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write('<?xml version="1.0"?><Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" '
+                    'xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"><Worksheet ss:Name="S"><Table>'
+                    + "".join(row_xml(r) for r in all_rows) + "</Table></Worksheet></Workbook>")
+    elif kind == "tsv":
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join("\t".join(r) for r in all_rows))
+    return path
+
+
 if __name__ == "__main__":
     out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "samples")
     os.makedirs(out, exist_ok=True)

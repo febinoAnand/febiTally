@@ -73,3 +73,29 @@ def test_password_protected_statements(tmp_path, maker, name):
         parse_statement(path, password="nope")
     assert exc.value.wrong_password and "Incorrect password" in str(exc.value)
     assert _summary(parse_statement(path, password="secret")) == EXPECTED
+
+
+@pytest.mark.parametrize("kind", ["xlsx", "html", "xml2003", "tsv"])
+def test_xls_files_that_are_really_something_else(tmp_path, kind):
+    """Banks name many formats .xls; the reader goes by content. The summary block is ignored."""
+    rows = parse_statement(fixtures.make_disguised_xls(str(tmp_path / ("s_%s.xls" % kind)), kind))
+    assert [(r["txn_date"], r["narration"], r["ref_no"], r["debit"], r["credit"], r["balance"]) for r in rows] == [
+        ("2026-04-07", "SMS CHARGES", "", 2.12, 0.0, 1191.12),
+        ("2026-07-01", "INTEREST ON SB A/C", "", 0.0, 7.0, 1198.12),
+    ]
+
+
+def test_encrypted_xlsx_named_xls(tmp_path):
+    path = fixtures.make_encrypted_excel(str(tmp_path / "locked.xls"))
+    assert _summary(parse_statement(path, password="secret")) == EXPECTED
+
+
+def test_wrapped_narration_is_joined_but_summary_is_not():
+    from services.statement_parser import rows_from_table
+    table = [["Date", "Narration", "Withdrawal", "Deposit"],
+             ["01/04/2026", "NEFT TO ACME", "100", ""],
+             ["", "TRADERS PVT LTD", "", ""],          # wrapped line: joined
+             ["", "", "", ""],
+             ["", "Debit Count", "", ""]]               # after a blank row: not joined
+    rows = rows_from_table(table)
+    assert [r["narration"] for r in rows] == ["NEFT TO ACME TRADERS PVT LTD"]

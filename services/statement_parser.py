@@ -154,17 +154,33 @@ def _cell(row, mapping, field):
     return row[idx]
 
 
+def _clean_ref(value):
+    """Cheque/reference number; placeholders banks print for "none" ('0', '-', 'NA') become ''."""
+    ref = str(value if value is not None else "").strip()
+    if isinstance(value, float) and value.is_integer():
+        ref = str(int(value))
+    return "" if ref.lower() in ("0", "-", "--", "na", "n/a", "nil", "none", "nan") else ref
+
+
 def _normalise(rows, mapping):
     out = []
+    continues = False  # may a date-less row still belong to the previous entry?
     for row in rows:
         date = parse_date(_cell(row, mapping, "txn_date"))
         narration = str(_cell(row, mapping, "narration") or "").strip()
         if not date:
-            # Multi-line narration in PDFs: a row without a date continues the previous entry.
-            if out and narration and not any(parse_amount(_cell(row, mapping, f))
-                                             for f in ("debit", "credit", "amount")):
+            # Multi-line narration (common in PDFs): a row right below an entry, holding only
+            # narration text, continues it. A blank row ends the table, so summary blocks such as
+            # "Opening Balance / Debit Count" below the transactions are never glued on.
+            others = [str(c).strip() for i, c in enumerate(row) if i != mapping.get("narration")]
+            if not narration and not any(others):
+                continues = False
+            elif out and continues and narration and not any(others):
                 out[-1]["narration"] = (out[-1]["narration"] + " " + narration).strip()
+            else:
+                continues = False
             continue
+        continues = True
         debit = parse_amount(_cell(row, mapping, "debit"))
         credit = parse_amount(_cell(row, mapping, "credit"))
         if "amount" in mapping and not debit and not credit:
@@ -184,7 +200,7 @@ def _normalise(rows, mapping):
         out.append({
             "txn_date": date,
             "narration": re.sub(r"\s+", " ", narration),
-            "ref_no": str(_cell(row, mapping, "ref_no") or "").strip(),
+            "ref_no": _clean_ref(_cell(row, mapping, "ref_no")),
             "debit": round(debit, 2),
             "credit": round(credit, 2),
             "balance": round(parse_amount(balance_raw), 2) if balance_raw not in (None, "") else None,
@@ -198,57 +214,175 @@ def _normalise(rows, mapping):
 def read_table(path, password=None):
     """Read a statement file into a 2D list of cells (all sheets / pages concatenated).
 
+    Spreadsheet files are recognised by their content, not their extension: banks often send a
+    real .xlsx named .xls, an HTML table or Excel 2003 XML saved as .xls, or tab-separated text.
     Raises PasswordRequired for an encrypted PDF / Excel file when `password` is missing or wrong.
     """
     ext = os.path.splitext(path)[1].lower()
     if ext == ".pdf":
         return _read_pdf_tables(path, password)
-    if ext == ".csv":
-        return _read_csv(path)
-    if ext in (".xlsx", ".xls"):
-        source = _decrypt_excel(path, password)
-        engine = "openpyxl" if ext == ".xlsx" else "xlrd"
-        sheets = pd.read_excel(source, header=None, sheet_name=None, dtype=object, engine=engine)
-        table = []
-        for df in sheets.values():
-            table.extend(df.where(pd.notna(df), "").values.tolist())
-        return table
-    raise ParseError("Unsupported file type: %s" % ext)
+    if ext not in (".xlsx", ".xls", ".csv"):
+        raise ParseError("Unsupported file type: %s" % ext)
+    with open(path, "rb") as f:
+        data = f.read()
+    kind = sniff_format(data)
+    if kind == "ole":
+        data = _decrypt_office(data, password)  # no-op for an unencrypted .xls
+        kind = sniff_format(data)
+    if kind == "pdf":
+        return _read_pdf_tables(path, password)
+    if kind in ("xlsx", "ole"):
+        return _read_workbook(data, "openpyxl" if kind == "xlsx" else "xlrd")
+    text = _decode_text(data)
+    if kind == "html":
+        return _read_html_tables(text)
+    if kind == "xml2003":
+        return _read_spreadsheet_xml(text)
+    return _read_csv_text(text)
 
 
-def _decrypt_excel(path, password):
-    """Return `path` for a normal workbook, or a decrypted in-memory copy of an encrypted one.
+def sniff_format(data):
+    """'xlsx' (zip), 'ole' (old .xls or an encrypted workbook), 'pdf', 'html', 'xml2003' or 'text'."""
+    if data[:4] == b"PK\x03\x04":
+        return "xlsx"
+    if data[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
+        return "ole"
+    if data[:5] == b"%PDF-":
+        return "pdf"
+    head = _decode_text(data[:8192]).lstrip().lower()
+    if head.startswith("<"):
+        if "urn:schemas-microsoft-com:office:spreadsheet" in head or "<workbook" in head:
+            return "xml2003"
+        return "html"
+    return "text"
+
+
+def _decode_text(data):
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return data.decode("utf-16", errors="replace")
+    for enc in ("utf-8-sig", "cp1252"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("latin-1")
+
+
+def _read_workbook(data, engine):
+    import io
+
+    sheets = pd.read_excel(io.BytesIO(data), header=None, sheet_name=None, dtype=object, engine=engine)
+    table = []
+    for df in sheets.values():
+        table.extend(df.where(pd.notna(df), "").values.tolist())
+        table.append([])  # keep sheets apart
+    return table
+
+
+def _decrypt_office(data, password):
+    """Decrypt an encrypted workbook in memory (never on disk); unencrypted data is returned as is.
 
     Excel's built-in default password (used for "read-only recommended" files) is tried first,
-    so those open without asking. The decrypted copy never touches the disk.
+    so those open without asking.
     """
     import io
 
     import msoffcrypto
-    from msoffcrypto.exceptions import FileFormatError, InvalidKeyError
+    from msoffcrypto.exceptions import DecryptionError, FileFormatError, InvalidKeyError
 
-    with open(path, "rb") as f:
+    try:
+        encrypted = msoffcrypto.OfficeFile(io.BytesIO(data)).is_encrypted()
+    except (FileFormatError, OSError, ValueError, KeyError, AssertionError):
+        return data  # an ordinary .xls that msoffcrypto does not need to handle
+    if not encrypted:
+        return data
+    for candidate in ("VelvetSweatshop", password):
+        if not candidate:
+            continue
         try:
-            office = msoffcrypto.OfficeFile(f)
-            encrypted = office.is_encrypted()
-        except (FileFormatError, OSError, ValueError, KeyError):
-            return path  # a plain xlsx (zip) or xls that msoffcrypto does not handle
-        if not encrypted:
-            return path
-        for candidate in ("VelvetSweatshop", password):
-            if not candidate:
-                continue
-            try:
-                f.seek(0)
-                office = msoffcrypto.OfficeFile(f)
-                office.load_key(password=candidate)
-                out = io.BytesIO()
-                office.decrypt(out)
-                out.seek(0)
-                return out
-            except (InvalidKeyError, msoffcrypto.exceptions.DecryptionError):
-                continue
+            office = msoffcrypto.OfficeFile(io.BytesIO(data))
+            office.load_key(password=candidate)
+            out = io.BytesIO()
+            office.decrypt(out)
+            return out.getvalue()
+        except (InvalidKeyError, DecryptionError):
+            continue
     raise PasswordRequired(wrong_password=bool(password))
+
+
+def _read_html_tables(text):
+    """Rows of every <table> in an HTML page (what many banks save as .xls)."""
+    from html.parser import HTMLParser
+
+    class Tables(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.rows, self.row, self.cell, self.skip = [], None, None, 0
+
+        def handle_starttag(self, tag, attrs):
+            if tag in ("script", "style"):
+                self.skip += 1
+            elif tag == "tr":
+                self._end_row()
+                self.row = []
+            elif tag in ("td", "th"):
+                self._end_cell()
+                if self.row is None:
+                    self.row = []
+                self.cell = []
+                span = str(dict(attrs).get("colspan") or "1")
+                self.colspan = int(span) if span.isdigit() else 1
+            elif tag == "br" and self.cell is not None:
+                self.cell.append(" ")
+
+        def handle_endtag(self, tag):
+            if tag in ("script", "style"):
+                self.skip = max(self.skip - 1, 0)
+            elif tag in ("td", "th"):
+                self._end_cell()
+            elif tag in ("tr", "table"):
+                self._end_row()
+
+        def handle_data(self, data):
+            if self.cell is not None and not self.skip:
+                self.cell.append(data)
+
+        def _end_cell(self):
+            if self.cell is not None and self.row is not None:
+                self.row.append(re.sub(r"\s+", " ", "".join(self.cell)).strip())
+                self.row.extend([""] * (self.colspan - 1))
+            self.cell = None
+
+        def _end_row(self):
+            self._end_cell()
+            if self.row is not None:
+                self.rows.append(self.row)
+            self.row = None
+
+    parser = Tables()
+    parser.feed(text)
+    parser.close()
+    parser._end_row()
+    return parser.rows
+
+
+def _read_spreadsheet_xml(text):
+    """Rows of an Excel 2003 XML ("XML Spreadsheet") workbook."""
+    import xml.etree.ElementTree as ET
+
+    root = ET.fromstring(re.sub(r"^\s*<\?xml[^>]*\?>", "", text.strip()))
+    ns = "{urn:schemas-microsoft-com:office:spreadsheet}"
+    rows = []
+    for row in root.iter(ns + "Row"):
+        cells = []
+        for cell in row.findall(ns + "Cell"):
+            index = cell.get(ns + "Index")
+            if index and index.isdigit():
+                cells.extend([""] * (int(index) - 1 - len(cells)))
+            data = cell.find(ns + "Data")
+            cells.append("".join(data.itertext()).strip() if data is not None else "")
+        rows.append(cells)
+    return rows
 
 
 def _open_pdf(path, password):
@@ -265,24 +399,21 @@ def _open_pdf(path, password):
         raise
 
 
-def _read_csv(path):
-    """CSV rows as lists. Uses the csv module (not pandas) because bank CSVs often start with
+def _read_csv_text(text):
+    """Delimited text rows. Uses the csv module (not pandas) because bank CSVs often start with
     one-cell title lines, and rows of different lengths must all be kept."""
     import csv
 
-    with open(path, "rb") as f:
-        raw = f.read()
-    for enc in ("utf-8-sig", "cp1252", "latin-1"):
-        try:
-            text = raw.decode(enc)
-            break
-        except UnicodeDecodeError:
-            continue
-    try:
-        dialect = csv.Sniffer().sniff(text[:8192], delimiters=",;\t|")
-    except csv.Error:
-        dialect = csv.excel
-    return [row for row in csv.reader(text.splitlines(), dialect)]
+    lines = text.splitlines()
+    sample = lines[:200]
+
+    # The delimiter that splits the most lines into 3+ fields wins. (csv.Sniffer is misled by
+    # amounts such as 1,191.12 in tab-separated files.) Ties go to tab, then ; | and ,.
+    def score(delim):
+        return sum(1 for r in csv.reader(sample, delimiter=delim) if len(r) >= 3)
+
+    delimiter = max(["\t", ";", "|", ","], key=lambda d: (score(d), -["\t", ";", "|", ","].index(d)))
+    return [row for row in csv.reader(lines, delimiter=delimiter)]
 
 
 def _read_pdf_tables(path, password=None):
