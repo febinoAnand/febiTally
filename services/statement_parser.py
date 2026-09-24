@@ -34,6 +34,15 @@ DATE_RE = re.compile(r"^\s*(\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}|\d{4}-\d{2}-\d{2}|
 AMOUNT_RE = re.compile(r"-?\d{1,3}(?:,\d{2,3})*(?:\.\d{1,2})|-?\d+\.\d{1,2}")
 
 
+class PasswordRequired(Exception):
+    """The statement file is password-protected and no (or a wrong) password was given."""
+
+    def __init__(self, wrong_password=False):
+        super().__init__("Incorrect password. Try again." if wrong_password
+                         else "This statement is password-protected. Enter its password to open it.")
+        self.wrong_password = wrong_password
+
+
 class ParseError(Exception):
     """Raised when a statement cannot be parsed. `headers`/`preview` help the UI offer column mapping."""
 
@@ -186,20 +195,74 @@ def _normalise(rows, mapping):
 
 # --------------------------------------------------------------------------- readers
 
-def read_table(path):
-    """Read a statement file into a 2D list of cells (all sheets / pages concatenated)."""
+def read_table(path, password=None):
+    """Read a statement file into a 2D list of cells (all sheets / pages concatenated).
+
+    Raises PasswordRequired for an encrypted PDF / Excel file when `password` is missing or wrong.
+    """
     ext = os.path.splitext(path)[1].lower()
     if ext == ".pdf":
-        return _read_pdf_tables(path)
+        return _read_pdf_tables(path, password)
     if ext == ".csv":
         return _read_csv(path)
     if ext in (".xlsx", ".xls"):
-        sheets = pd.read_excel(path, header=None, sheet_name=None, dtype=object)
+        source = _decrypt_excel(path, password)
+        engine = "openpyxl" if ext == ".xlsx" else "xlrd"
+        sheets = pd.read_excel(source, header=None, sheet_name=None, dtype=object, engine=engine)
         table = []
         for df in sheets.values():
             table.extend(df.where(pd.notna(df), "").values.tolist())
         return table
     raise ParseError("Unsupported file type: %s" % ext)
+
+
+def _decrypt_excel(path, password):
+    """Return `path` for a normal workbook, or a decrypted in-memory copy of an encrypted one.
+
+    Excel's built-in default password (used for "read-only recommended" files) is tried first,
+    so those open without asking. The decrypted copy never touches the disk.
+    """
+    import io
+
+    import msoffcrypto
+    from msoffcrypto.exceptions import FileFormatError, InvalidKeyError
+
+    with open(path, "rb") as f:
+        try:
+            office = msoffcrypto.OfficeFile(f)
+            encrypted = office.is_encrypted()
+        except (FileFormatError, OSError, ValueError, KeyError):
+            return path  # a plain xlsx (zip) or xls that msoffcrypto does not handle
+        if not encrypted:
+            return path
+        for candidate in ("VelvetSweatshop", password):
+            if not candidate:
+                continue
+            try:
+                f.seek(0)
+                office = msoffcrypto.OfficeFile(f)
+                office.load_key(password=candidate)
+                out = io.BytesIO()
+                office.decrypt(out)
+                out.seek(0)
+                return out
+            except (InvalidKeyError, msoffcrypto.exceptions.DecryptionError):
+                continue
+    raise PasswordRequired(wrong_password=bool(password))
+
+
+def _open_pdf(path, password):
+    """Open a PDF with pdfplumber; PasswordRequired if it is encrypted and the password is missing/wrong."""
+    import pdfplumber
+
+    try:
+        pdf = pdfplumber.open(path, password=password or "")
+        pdf.pages  # noqa: B018 - forces the document (and its encryption) to be read
+        return pdf
+    except Exception as exc:
+        if "PDFPasswordIncorrect" in repr(exc) or type(exc).__name__ == "PDFPasswordIncorrect":
+            raise PasswordRequired(wrong_password=bool(password))
+        raise
 
 
 def _read_csv(path):
@@ -222,28 +285,24 @@ def _read_csv(path):
     return [row for row in csv.reader(text.splitlines(), dialect)]
 
 
-def _read_pdf_tables(path):
-    import pdfplumber
-
+def _read_pdf_tables(path, password=None):
     table = []
-    with pdfplumber.open(path) as pdf:
+    with _open_pdf(path, password) as pdf:
         for page in pdf.pages:
             for t in page.extract_tables() or []:
                 table.extend(t)
     return table
 
 
-def _read_pdf_lines(path):
+def _read_pdf_lines(path, password=None):
     """Fallback for PDFs without ruled tables: parse text lines that start with a date.
 
     Line shape: <date> <narration...> [ref] <amount> [amount] <balance>. With two amounts we
     compare the balance with the previous one to decide whether the amount is a debit or a credit.
     """
-    import pdfplumber
-
     entries = []
     prev_balance = None
-    with pdfplumber.open(path) as pdf:
+    with _open_pdf(path, password) as pdf:
         for page in pdf.pages:
             for line in (page.extract_text() or "").splitlines():
                 m = DATE_RE.match(line)
@@ -279,9 +338,9 @@ def _read_pdf_lines(path):
     return entries
 
 
-def parse_statement(path, mapping=None, header_row=None):
+def parse_statement(path, mapping=None, header_row=None, password=None):
     """Parse a statement file. Raises ParseError (with headers/preview) when columns can't be found."""
-    table = read_table(path)
+    table = read_table(path, password)
     if path.lower().endswith(".pdf"):
         try:
             rows = rows_from_table(table, mapping, header_row) if table else []
@@ -290,7 +349,7 @@ def parse_statement(path, mapping=None, header_row=None):
                 raise
             rows = []
         if not rows and not mapping:
-            rows = _read_pdf_lines(path)
+            rows = _read_pdf_lines(path, password)
         if not rows:
             raise ParseError("No transactions found in the PDF. If it is a scanned image, export the "
                              "statement as Excel or a text PDF instead.",
@@ -307,14 +366,14 @@ RAW_PREVIEW_ROWS = 80
 RAW_CELL_CHARS = 60
 
 
-def inspect_statement(path, mapping=None, header_row=None):
+def inspect_statement(path, mapping=None, header_row=None, password=None):
     """Everything the column-mapping dialog needs, plus the parsed rows.
 
     With `mapping` None, the detected header row and mapping are used. Returns (info, rows):
       info = {mode: 'table'|'text', detected, header_row, mapping, columns, raw, count, problem}
     mode 'text' means a PDF without tables, read line by line (column mapping does not apply).
     """
-    table = _clean_table(read_table(path))
+    table = _clean_table(read_table(path, password))
     detected_row, detected_map = find_header(table)
     user_mapping = mapping is not None  # {} from the dialog means "nothing mapped", not "auto-detect"
     if not user_mapping:
@@ -326,7 +385,7 @@ def inspect_statement(path, mapping=None, header_row=None):
         start = header_row + 1 if header_row is not None else 0
         rows = _normalise(table[start:], mapping)
     if not rows and not user_mapping and path.lower().endswith(".pdf"):
-        rows = _read_pdf_lines(path)
+        rows = _read_pdf_lines(path, password)
         if rows:
             mode, problem = "text", None
     if not mapping and mode == "table" and not user_mapping:

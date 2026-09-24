@@ -12,7 +12,8 @@ import db
 from routes import ApiError, body, exchange, require_company, tally
 from services import ledger_matcher
 from services.ledger_groups import CASH_BANK_GROUPS
-from services.statement_parser import ParseError, inspect_statement, parse_date, parse_statement
+from services.statement_parser import (ParseError, PasswordRequired, inspect_statement, parse_date,
+                                      parse_statement)
 from services.tally_client import TallyError
 
 bp = Blueprint("api_imports", __name__, url_prefix="/api/imports")
@@ -210,10 +211,18 @@ def _mapping_arg(raw, header_row_raw):
     return mapping, header_row
 
 
-def _inspect(path, mapping, header_row):
+def _password_needed(exc, token, filename):
+    """422 telling the browser to ask for the statement's password (the upload is kept by token)."""
+    return ApiError(str(exc), 422, need_password=True, wrong_password=exc.wrong_password,
+                    token=token, filename=filename)
+
+
+def _inspect(path, mapping, header_row, password, token, filename):
     try:
-        return inspect_statement(path, mapping, header_row)
-    except Exception as exc:  # corrupt or password-protected files
+        return inspect_statement(path, mapping, header_row, password)
+    except PasswordRequired as exc:
+        raise _password_needed(exc, token, filename)
+    except Exception as exc:  # corrupt or unsupported files
         raise ApiError("Could not read the file: %s" % exc, 422)
 
 
@@ -221,7 +230,9 @@ def _inspect(path, mapping, header_row):
 def preview_import():
     """Upload (or re-inspect) a statement for the column-mapping dialog. Nothing is imported.
 
-    multipart: file  — or form/JSON: token; optional mapping (JSON {field: column}), header_row.
+    multipart: file  — or form/JSON: token; optional mapping (JSON {field: column}), header_row,
+    password (for an encrypted PDF/Excel file). A protected file without the right password gets
+    422 {need_password, wrong_password, token}: ask for the password and send it with the token.
     """
     data = request.form if request.files or request.form else body(request)
     if request.files.get("file"):
@@ -232,9 +243,10 @@ def preview_import():
         token = data.get("token")
         path, filename = _upload_path(token)
     mapping, header_row = _mapping_arg(data.get("mapping"), data.get("header_row"))
-    info, rows = _inspect(path, mapping, header_row)
+    password = data.get("password") or None  # only used to open the file; never stored or logged
+    info, rows = _inspect(path, mapping, header_row, password, token, filename)
     return jsonify(dict(info, token=token, filename=filename, fields=MAPPABLE_FIELDS,
-                        sample=rows[:PREVIEW_SAMPLE_ROWS]))
+                        protected=bool(password), sample=rows[:PREVIEW_SAMPLE_ROWS]))
 
 
 @bp.post("")
@@ -256,17 +268,20 @@ def create_import():
         raise ApiError("Select the bank ledger this statement belongs to.")
 
     mapping, header_row = _mapping_arg(request.form.get("mapping"), request.form.get("header_row"))
+    password = request.form.get("password") or None
     if request.form.get("token"):
         path, filename = _upload_path(request.form["token"])
-        info, rows = _inspect(path, mapping, header_row)
+        info, rows = _inspect(path, mapping, header_row, password, request.form["token"], filename)
         if not rows:
             raise ApiError(info["problem"] or "No transactions found with this column mapping.", 422)
     else:
         upload = request.files.get("file")
-        _token, path = _save_upload(upload)
+        token, path = _save_upload(upload)
         filename = upload.filename
         try:
-            rows = parse_statement(path, mapping, header_row)
+            rows = parse_statement(path, mapping, header_row, password)
+        except PasswordRequired as exc:
+            raise _password_needed(exc, token, filename)  # keep the file: retry with token + password
         except ParseError as exc:
             os.remove(path)
             raise ApiError(str(exc), 422, need_mapping=True, headers=exc.headers, preview=exc.preview)

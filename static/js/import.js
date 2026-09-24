@@ -115,9 +115,67 @@
   $("upload-btn").addEventListener("click", () => withButton($("upload-btn"), async () => {
     const fd = new FormData();
     fd.append("file", file);
-    preview = await api("POST", "/api/imports/preview", fd);
+    try {
+      preview = await api("POST", "/api/imports/preview", fd);
+    } catch (e) {
+      if (e.data.need_password) return askPassword(e.data);
+      throw e;
+    }
     openMappingDialog();
   }));
+
+  /* ------------------------------------------------------------ password-protected statements */
+
+  // The password lives only in this page's memory (preview.password) and is sent with each request
+  // that has to open the file. The server never stores or logs it.
+  let pendingUnlock = null; // {token, filename} of the upload waiting for its password
+
+  function askPassword(data) {
+    pendingUnlock = { token: data.token, filename: data.filename };
+    $("pw-file").textContent = data.filename || "";
+    $("pw-input").value = "";
+    $("pw-input").type = "password";
+    $("pw-toggle").textContent = "Show";
+    showPasswordError(data.wrong_password ? data.error : "");
+    openModal("password-modal");
+    $("pw-input").focus();
+  }
+
+  function showPasswordError(message) {
+    $("pw-error").textContent = message || "";
+    $("pw-error").classList.toggle("hidden", !message);
+    $("pw-input").classList.toggle("invalid", !!message);
+  }
+
+  $("pw-toggle").addEventListener("click", () => {
+    const show = $("pw-input").type === "password";
+    $("pw-input").type = show ? "text" : "password";
+    $("pw-toggle").textContent = show ? "Hide" : "Show";
+    $("pw-input").focus();
+  });
+
+  $("password-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const password = $("pw-input").value;
+    if (!password) return showPasswordError("Enter the password.");
+    withButton($("pw-unlock"), async () => {
+      try {
+        const r = await api("POST", "/api/imports/preview", { token: pendingUnlock.token, password });
+        preview = Object.assign(r, { password });
+      } catch (err) {
+        if (err.data.need_password) {
+          showPasswordError(err.message);
+          $("pw-input").select();
+          return;
+        }
+        throw err;
+      }
+      pendingUnlock = null;
+      $("pw-input").value = "";
+      closeModal("password-modal");
+      openMappingDialog();
+    });
+  });
 
   function currentMapping() {
     const mapping = {};
@@ -131,7 +189,7 @@
 
   function openMappingDialog() {
     const p = preview;
-    $("map-sub").textContent = `${p.filename} · ${p.total_rows} rows in file · ${companySel.value} · ${bankSel.value}`;
+    $("map-sub").textContent = `${p.filename}${p.password ? " · password-protected (unlocked)" : ""} · ${p.total_rows} rows in file · ${companySel.value} · ${bankSel.value}`;
     const tableMode = p.mode === "table";
     $("map-controls").classList.toggle("hidden", !tableMode);
     $("map-raw-wrap").classList.toggle("hidden", !tableMode);
@@ -259,6 +317,7 @@
       try {
         const r = await api("POST", "/api/imports/preview", {
           token: preview.token, mapping: currentMapping(), header_row: currentHeaderRow(),
+          password: preview.password || undefined,
         });
         if (seq !== previewSeq) return; // a newer change is in flight
         Object.assign(preview, { count: r.count, sample: r.sample, problem: r.problem, userChanged: true });
@@ -288,6 +347,7 @@
     fd.append("company", companySel.value);
     fd.append("bank_ledger", bankSel.value);
     fd.append("token", preview.token);
+    if (preview.password) fd.append("password", preview.password);
     if (preview.mode === "table") {
       fd.append("mapping", JSON.stringify(currentMapping()));
       const hr = currentHeaderRow();

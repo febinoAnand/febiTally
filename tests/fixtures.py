@@ -81,6 +81,31 @@ def make_pdf_text(path):
     return path
 
 
+def make_encrypted_pdf(path, password="secret"):
+    """Password-protected PDF statement with a ruled table (like most bank e-statements)."""
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
+
+    data = [HEADER] + [[("%.2f" % c) if isinstance(c, float) else (c or "") for c in r] for r in ROWS]
+    table = Table(data)
+    table.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.5, colors.black)]))
+    SimpleDocTemplate(path, pagesize=landscape(A4), encrypt=password).build([table])
+    return path
+
+
+def make_encrypted_excel(path, password="secret"):
+    """Excel statement encrypted with a password (File > Protect Workbook > Encrypt with Password)."""
+    from msoffcrypto.format.ooxml import OOXMLFile
+
+    plain = path + ".plain.xlsx"
+    make_excel(plain)
+    with open(plain, "rb") as f, open(path, "wb") as out:
+        OOXMLFile(f).encrypt(password, out)
+    os.remove(plain)
+    return path
+
+
 if __name__ == "__main__":
     out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "samples")
     os.makedirs(out, exist_ok=True)
@@ -89,4 +114,6 @@ if __name__ == "__main__":
     make_excel_with_ledger(os.path.join(out, "sample_statement_with_ledger.xlsx"))
     make_pdf_table(os.path.join(out, "sample_statement.pdf"))
     make_pdf_text(os.path.join(out, "sample_statement_text.pdf"))
+    make_encrypted_pdf(os.path.join(out, "sample_statement_protected.pdf"))      # password: secret
+    make_encrypted_excel(os.path.join(out, "sample_statement_protected.xlsx"))   # password: secret
     print("Samples written to", out)

@@ -297,3 +297,9 @@ select.flash { animation: flash .9s ease-out; }
 .confirm-icon.danger { background: var(--danger-soft); color: var(--danger); }
 .btn-danger-solid { background: var(--danger); border-color: var(--danger); color: #fff; }
 .btn-danger-solid:hover { background: #991b1b; }
+
+/* ---------- password prompt */
+.input-group { display: flex; gap: 6px; }
+.input-group input { flex: 1; }
+input.invalid { border-color: var(--danger); background: var(--danger-soft); }
+#pw-error { margin-top: 6px; font-size: 13px; }

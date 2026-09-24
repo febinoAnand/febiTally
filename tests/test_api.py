@@ -380,3 +380,36 @@ def test_opening_import_switches_cash_bank_rows_to_contra(app, client, fake_tall
     with app.app_context():
         dbmod.execute("UPDATE entries SET voucher_type = 'Payment' WHERE id = ?", (atm["id"],))
     assert client.get("/api/imports/%d" % import_id).get_json()["voucher_types_corrected"] == 0
+
+
+def test_password_protected_upload_flow(app, client, fake_tally, tmp_path):
+    client.post("/api/ledgers/fetch", json={"company": COMPANY})
+    for maker, name in ((fixtures.make_encrypted_pdf, "locked.pdf"), (fixtures.make_encrypted_excel, "locked.xlsx")):
+        # 1. upload without password: asked for one, file kept by token
+        r = _preview(client, maker(str(tmp_path / name)), name)
+        body = r.get_json()
+        assert r.status_code == 422 and body["need_password"] and not body["wrong_password"]
+        token = body["token"]
+        assert body["filename"] == name
+        # 2. wrong password
+        r = client.post("/api/imports/preview", json={"token": token, "password": "nope"})
+        assert r.status_code == 422 and r.get_json()["wrong_password"]
+        assert "Incorrect password" in r.get_json()["error"]
+        # 3. right password: mapping dialog data, and live re-preview still needs the password
+        p = client.post("/api/imports/preview", json={"token": token, "password": "secret"}).get_json()
+        assert p["count"] == 4 and p["protected"] and p["header_row"] is not None
+        r = client.post("/api/imports/preview", json={"token": token, "mapping": p["mapping"],
+                                                       "header_row": p["header_row"]})
+        assert r.status_code == 422 and r.get_json()["need_password"]
+        # 4. import needs the password too
+        form = {"company": COMPANY, "bank_ledger": "HDFC Bank", "token": token,
+                "mapping": json.dumps(p["mapping"]), "header_row": str(p["header_row"])}
+        assert client.post("/api/imports", data=form).get_json()["need_password"]
+        r = client.post("/api/imports", data=dict(form, password="secret"))
+        assert r.status_code == 201 and r.get_json()["count"] == 4
+
+    # the password is never stored
+    import sqlite3
+    conn = sqlite3.connect(app.config["DB_PATH"])
+    for table in ("settings", "imports", "entries"):
+        assert "secret" not in repr(conn.execute("SELECT * FROM %s" % table).fetchall())

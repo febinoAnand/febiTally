@@ -59,3 +59,17 @@ def test_unknown_columns_need_mapping(tmp_path):
     assert exc.value.headers == ["When", "What", "How much"]
     rows = parse_statement(str(path), mapping={"txn_date": 0, "narration": 1, "debit": 2})
     assert _summary(rows) == [("2026-04-01", 100.0, 0.0)]
+
+
+@pytest.mark.parametrize("maker,name", [(fixtures.make_encrypted_pdf, "p.pdf"),
+                                        (fixtures.make_encrypted_excel, "p.xlsx")])
+def test_password_protected_statements(tmp_path, maker, name):
+    from services.statement_parser import PasswordRequired
+    path = maker(str(tmp_path / name))
+    with pytest.raises(PasswordRequired) as exc:
+        parse_statement(path)
+    assert not exc.value.wrong_password
+    with pytest.raises(PasswordRequired) as exc:
+        parse_statement(path, password="nope")
+    assert exc.value.wrong_password and "Incorrect password" in str(exc.value)
+    assert _summary(parse_statement(path, password="secret")) == EXPECTED
