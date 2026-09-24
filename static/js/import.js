@@ -389,6 +389,11 @@
     $("review-sub").textContent = `${imp.company} · Bank: ${imp.bank_ledger} · uploaded ${imp.created_at}`;
 
     const rows = visibleEntries();
+    // Re-rendering replaces the inputs; remember the ledger box being typed in so focus survives.
+    const active = document.activeElement;
+    const keep = active && active.dataset && active.dataset.ledger
+      ? { id: active.dataset.ledger, value: active.value, start: active.selectionStart, end: active.selectionEnd }
+      : null;
     $("entries").innerHTML = rows.length ? rows.map((e) => `
       <tr class="row-${e.status}" data-id="${e.id}">
         <td><input type="checkbox" data-check="${e.id}" ${selected.has(e.id) ? "checked" : ""} ${locked(e) ? "disabled" : ""}></td>
@@ -414,6 +419,14 @@
         </td>
       </tr>`).join("")
       : `<tr><td colspan="10" class="empty">No entries${filter !== "all" ? " with status " + filter : ""}.</td></tr>`;
+    if (keep) {
+      const el = document.querySelector(`#entries [data-ledger="${keep.id}"]`);
+      if (el && !el.disabled) {
+        el.value = keep.value;
+        el.focus();
+        try { el.setSelectionRange(keep.start, keep.end); } catch (_) { /* not a text selection */ }
+      }
+    }
 
     const all = current.entries;
     const count = (s) => all.filter((e) => e.status === s).length;
@@ -475,6 +488,18 @@
     } catch (err) {
       toast(err.message, "error");
     }
+  });
+
+  // Tab / Shift+Tab in a ledger box jumps to the next / previous row's ledger box (skipping the
+  // voucher dropdown and row buttons). At the first/last row Tab behaves normally.
+  $("entries").addEventListener("keydown", (e) => {
+    if (e.key !== "Tab" || !e.target.dataset.ledger) return;
+    const boxes = [...document.querySelectorAll("#entries input[data-ledger]:not([disabled])")];
+    const next = boxes[boxes.indexOf(e.target) + (e.shiftKey ? -1 : 1)];
+    if (!next) return;
+    e.preventDefault();
+    next.focus();
+    next.select();
   });
 
   let editingId = null;

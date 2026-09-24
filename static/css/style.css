@@ -272,3 +272,7 @@ pre.console {
   .steps { flex-direction: column; }
 }
 select[data-vtype] { min-width: 104px; }
+kbd {
+  font: 600 11px ui-monospace, SFMono-Regular, Menlo, monospace; padding: 1px 5px; border-radius: 4px;
+  border: 1px solid var(--border); border-bottom-width: 2px; background: var(--surface-2); color: var(--text);
+}
