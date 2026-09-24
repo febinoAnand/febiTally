@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block heading %}Dashboard{% endblock %}
+{% block actions %}
+  <a class="btn" href="/ledgers">Fetch ledgers</a>
+  <a class="btn btn-primary" href="/import">Import statement</a>
+{% endblock %}
+{% block content %}
+<div class="grid stats">
+  <div class="card stat">
+    <div class="label">Tally Prime</div>
+    <div class="value" id="st-tally">…</div>
+    <div class="hint" id="st-tally-hint"></div>
+  </div>
+  <div class="card stat">
+    <div class="label">Imports</div>
+    <div class="value" id="st-imports">–</div>
+    <div class="hint">bank statements uploaded</div>
+  </div>
+  <div class="card stat">
+    <div class="label">Pending review</div>
+    <div class="value" id="st-pending">–</div>
+    <div class="hint">entries not validated yet</div>
+  </div>
+  <div class="card stat">
+    <div class="label">Ready to push</div>
+    <div class="value" id="st-validated">–</div>
+    <div class="hint">validated entries</div>
+  </div>
+  <div class="card stat">
+    <div class="label">Pushed to Tally</div>
+    <div class="value" id="st-pushed">–</div>
+    <div class="hint" id="st-failed-hint"></div>
+  </div>
+</div>
+
+<div class="grid two-col">
+  <div class="card">
+    <div class="card-head"><h2>Recent imports</h2><a href="/import">View all</a></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>#</th><th>File</th><th>Company / Bank</th><th>Date</th><th class="num">Entries</th>
+          <th class="num">Withdrawals</th><th class="num">Deposits</th><th>Status</th></tr></thead>
+        <tbody id="recent"><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-head"><h2>Ledgers cached</h2><a href="/ledgers">Manage</a></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Company</th><th class="num">Ledgers</th><th>Fetched</th></tr></thead>
+        <tbody id="ledger-counts"><tr><td colspan="3" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>{% endblock %}

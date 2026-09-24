@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}FebiTally{% endblock %} · FebiTally</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark">F</span>
+      <span class="brand-name">FebiTally</span>
+    </div>
+    <nav>
+      <a href="/" class="{{ 'active' if active == 'dashboard' }}">
+        <svg viewBox="0 0 24 24"><path d="M3 13h8V3H3zm0 8h8v-6H3zm10 0h8V11h-8zm0-18v6h8V3z"/></svg>Dashboard</a>
+      <a href="/import" class="{{ 'active' if active == 'import' }}">
+        <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7zM5 18v2h14v-2z"/></svg>Import Statement</a>
+      <a href="/ledgers" class="{{ 'active' if active == 'ledgers' }}">
+        <svg viewBox="0 0 24 24"><path d="M4 6h16v2H4zm0 5h16v2H4zm0 5h16v2H4z"/></svg>Ledgers</a>
+      <a href="/settings" class="{{ 'active' if active == 'settings' }}">
+        <svg viewBox="0 0 24 24"><path d="M19.4 13a7.8 7.8 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7.6 7.6 0 0 0-1.7-1L15 3h-4l-.4 2.7a7.6 7.6 0 0 0-1.7 1l-2.5-1-2 3.5L6.6 11a7.8 7.8 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1a7.6 7.6 0 0 0 1.7 1L11 21h4l.4-2.7a7.6 7.6 0 0 0 1.7-1l2.5 1 2-3.5zM13 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z"/></svg>Settings</a>
+    </nav>
+    <div class="sidebar-foot">
+      <span id="tally-dot" class="dot"></span>
+      <span id="tally-label">Checking Tally…</span>
+    </div>
+  </aside>
+
+  <main class="content">
+    <header class="page-head">
+      <h1>{% block heading %}{% endblock %}</h1>
+      <div class="page-actions">{% block actions %}{% endblock %}</div>
+    </header>
+    {% block content %}{% endblock %}
+  </main>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <div class="modal-backdrop hidden" id="response-modal">
+    <div class="modal wide">
+      <div class="modal-head">
+        <div><h2 id="response-title">Tally response</h2><div class="muted small" id="response-sub"></div></div>
+        <button class="close-x" data-close="response-modal">&times;</button>
+      </div>
+      <div class="modal-body"><pre class="console" id="response-body" style="max-height:60vh"></pre></div>
+      <div class="modal-foot">
+        <button class="btn" id="response-copy">Copy</button>
+        <button class="btn btn-primary" data-close="response-modal">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="{{ url_for('static', filename='js/common.js') }}"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

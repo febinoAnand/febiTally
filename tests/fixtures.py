@@ -1,0 +1,78 @@
+"""Generate sample bank statements (Excel, CSV, PDF) for tests and manual trials."""
+import os
+
+import openpyxl
+
+ROWS = [
+    ("01/04/2026", "NEFT-AWS INDIA-AMAZON WEB SERVICES", "N123", 8500.00, None, 91500.00),
+    ("03/04/2026", "UPI/ACME TRADERS/acme@okhdfcbank/Payment", "U456", None, 12000.00, 103500.00),
+    ("05/04/2026", "CHQ PAID-OFFICE RENT APRIL", "000781", 25000.00, None, 78500.00),
+    ("07/04/2026", "ATM WDL MG ROAD BANGALORE", "", 2000.00, None, 76500.00),
+]
+HEADER = ["Date", "Narration", "Chq./Ref.No.", "Withdrawal Amt.", "Deposit Amt.", "Closing Balance"]
+
+
+def make_excel(path):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["HDFC BANK LTD"])
+    ws.append(["Statement of account", "", "Account No: 50100012345678"])
+    ws.append([])
+    ws.append(HEADER)
+    for r in ROWS:
+        ws.append(list(r))
+    ws.append([])
+    ws.append(["", "STATEMENT SUMMARY", "", "35500.00", "12000.00", ""])
+    wb.save(path)
+    return path
+
+
+def make_csv_single_amount(path):
+    with open(path, "w") as f:
+        f.write("Txn Date,Description,Amount,Dr/Cr,Balance\n")
+        f.write("2026-04-01,SALARY CREDIT,50000.00,CR,150000.00\n")
+        f.write("2026-04-02,ELECTRICITY BILL,1,234.50,DR,148765.50\n".replace("1,234.50", '"1,234.50"'))
+    return path
+
+
+def make_pdf_table(path):
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
+    from reportlab.lib.styles import getSampleStyleSheet
+
+    data = [HEADER] + [[c if c is not None else "" for c in r] for r in ROWS]
+    data = [[("%.2f" % c) if isinstance(c, float) else c for c in row] for row in data]
+    table = Table(data)
+    table.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.5, colors.black)]))
+    doc = SimpleDocTemplate(path, pagesize=landscape(A4))
+    doc.build([Paragraph("HDFC BANK - Statement of account", getSampleStyleSheet()["Title"]), table])
+    return path
+
+
+def make_pdf_text(path):
+    """A PDF with plain text lines (no ruling), like many bank e-statements."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+
+    c = canvas.Canvas(path, pagesize=A4)
+    y = 800
+    for line in ["STATE BANK OF INDIA", "Date Description Debit Credit Balance",
+                 "Opening balance 100000.00",
+                 "01-04-2026 NEFT AWS INDIA 8,500.00 91,500.00",
+                 "03-04-2026 UPI ACME TRADERS 12,000.00 1,03,500.00",
+                 "05-04-2026 CHQ OFFICE RENT 25,000.00 78,500.00"]:
+        c.drawString(40, y, line)
+        y -= 18
+    c.save()
+    return path
+
+
+if __name__ == "__main__":
+    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "samples")
+    os.makedirs(out, exist_ok=True)
+    make_excel(os.path.join(out, "sample_statement.xlsx"))
+    make_csv_single_amount(os.path.join(out, "sample_statement.csv"))
+    make_pdf_table(os.path.join(out, "sample_statement.pdf"))
+    make_pdf_text(os.path.join(out, "sample_statement_text.pdf"))
+    print("Samples written to", out)
