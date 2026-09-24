@@ -281,3 +281,5 @@ kbd {
   font: 600 12px var(--font); color: var(--primary); text-align: left;
 }
 .link-btn:hover { text-decoration: underline; }
+select.flash { animation: flash .9s ease-out; }
+@keyframes flash { from { background: var(--warning-soft); border-color: var(--warning); } }

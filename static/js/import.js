@@ -353,10 +353,14 @@
   async function openImport(id) {
     const imp = await api("GET", `/api/imports/${id}`);
     const lr = await api("GET", `/api/ledgers?company=${encodeURIComponent(imp.import.company)}`);
+    if (imp.voucher_types_corrected) {
+      toast(`${imp.voucher_types_corrected} row(s) switched voucher type to match their ledger (Contra for cash/bank ledgers).`, "info", 7000);
+    }
     current = imp;
     current.ledgers = lr.ledgers.map((l) => l.name);
+    current.ledgerInfo = new Map(lr.ledgers.map((l) => [l.name, l]));
     selected.clear();
-    $("ledger-list").innerHTML = current.ledgers.map((n) => `<option value="${esc(n)}">`).join("");
+    renderLedgerList();
     $("setup").classList.add("hidden");
     $("review").classList.remove("hidden");
     $("new-import-btn").classList.remove("hidden");
@@ -365,6 +369,15 @@
     $("step-3").className = "step active";
     history.replaceState(null, "", `?id=${id}`);
     renderReview();
+  }
+
+  /* Suggestion list: each ledger labelled with its group; cash/bank ledgers flagged for Contra. */
+  function renderLedgerList() {
+    $("ledger-list").innerHTML = current.ledgers.map((n) => {
+      const l = current.ledgerInfo.get(n) || {};
+      const label = [l.parent, l.cash_bank ? "cash/bank · Contra" : ""].filter(Boolean).join(" · ");
+      return `<option value="${esc(n)}" label="${esc(label)}">`;
+    }).join("");
   }
 
   async function reloadImport() {
@@ -388,6 +401,17 @@
   const STATEMENT_LEDGER_RE = /^Ledger '(.+)' from the statement is not a ledger in Tally/;
   const ledgerKey = (name) => String(name || "").trim().toLowerCase();
   const canonicalLedger = (name) => current.ledgers.find((n) => ledgerKey(n) === ledgerKey(name));
+
+  /* Cash/bank ledgers take Contra vouchers (same rule as the server: flag from Fetch, or own group). */
+  const CASH_BANK_GROUPS = ["cash-in-hand", "bank accounts", "bank od a/c", "bank occ a/c"];
+  function isCashBank(name) {
+    const l = current.ledgerInfo.get(canonicalLedger(name) || "");
+    return !!l && (!!l.cash_bank || CASH_BANK_GROUPS.includes(ledgerKey(l.parent)));
+  }
+  function voucherTypeFor(entry, ledger) {
+    if (isCashBank(ledger)) return "Contra";
+    return Number(entry.debit || 0) > 0 ? "Payment" : "Receipt";
+  }
 
   /* The name a row wants but Tally lacks: typed into the box, or from a mapped statement column. */
   function missingLedger(e) {
@@ -459,7 +483,8 @@
         });
         current.ledgers.push(r.ledger.name);
         current.ledgers.sort((a, b) => a.localeCompare(b));
-        $("ledger-list").innerHTML = current.ledgers.map((n) => `<option value="${esc(n)}">`).join("");
+        current.ledgerInfo.set(r.ledger.name, r.ledger);
+        renderLedgerList();
         if (companySel.value === current.import.company) companyLedgers.push(r.ledger);
         try { localStorage.setItem("febitally.newLedgerGroup", parent); } catch (_) { /* storage blocked */ }
         toast(r.message, "success");
@@ -500,7 +525,7 @@
         <td><input class="inline-input" list="ledger-list" data-ledger="${e.id}" value="${esc(e.ledger)}"
               placeholder="Select ledger…" ${locked(e) ? "disabled" : ""}>${createButton(e)}</td>
         <td><select class="inline-input" data-vtype="${e.id}" ${locked(e) ? "disabled" : ""}>
-              ${["Payment", "Receipt"].map((t) => `<option ${t === e.voucher_type ? "selected" : ""}>${t}</option>`).join("")}
+              ${["Payment", "Receipt", "Contra"].map((t) => `<option ${t === e.voucher_type ? "selected" : ""}>${t}</option>`).join("")}
             </select></td>
         <td>${badge(e.status)}</td>
         <td class="num">
@@ -582,6 +607,20 @@
       }
     } catch (err) {
       toast(err.message, "error");
+    }
+  });
+
+  // Switch the Voucher dropdown as soon as the box names a known ledger (typed or picked from the
+  // list): Contra for cash/bank ledgers, Payment/Receipt otherwise. Saved when the box is left.
+  $("entries").addEventListener("input", (e) => {
+    const box = e.target;
+    if (!box.dataset.ledger || !canonicalLedger(box.value)) return;
+    const sel = document.querySelector(`#entries [data-vtype="${box.dataset.ledger}"]`);
+    const type = voucherTypeFor(entryById(box.dataset.ledger), box.value);
+    if (sel && sel.value !== type) {
+      sel.value = type;
+      sel.classList.add("flash");
+      setTimeout(() => sel.classList.remove("flash"), 900);
     }
   });
 

@@ -53,3 +53,23 @@ def test_payment_and_receipt_vouchers():
 def test_unreachable_tally():
     with pytest.raises(tc.TallyError, match="Cannot reach Tally"):
         tc.TallyClient("127.0.0.1", 1, timeout=1).list_companies()
+
+
+def test_contra_voucher_direction_follows_statement():
+    out = tc.build_voucher("HDFC Bank", {"voucher_type": "Contra", "debit": 2000, "credit": 0,
+                                         "ledger": "Cash", "txn_date": "2026-04-07"})
+    assert out["metadata"]["vchtype"] == out["vouchertypename"] == "Contra"
+    assert [l["ledgername"] for l in out["allledgerentries"]] == ["Cash", "HDFC Bank"]
+    inward = tc.build_voucher("HDFC Bank", {"voucher_type": "Contra", "debit": 0, "credit": 5000,
+                                            "ledger": "Cash", "txn_date": "2026-04-08"})
+    assert [l["ledgername"] for l in inward["allledgerentries"]] == ["HDFC Bank", "Cash"]
+
+
+def test_cash_bank_groups():
+    from services.ledger_groups import is_cash_bank_group
+    parents = {"Current Accounts": "Bank Accounts", "Savings": "Current Accounts", "Rent": "Indirect Expenses",
+               "Loop A": "Loop B", "Loop B": "Loop A"}
+    assert is_cash_bank_group("Cash-in-Hand") and is_cash_bank_group("bank od a/c")
+    assert is_cash_bank_group("Savings", parents)
+    assert not is_cash_bank_group("Rent", parents) and not is_cash_bank_group("", parents)
+    assert not is_cash_bank_group("Loop A", parents)  # malformed hierarchy does not hang

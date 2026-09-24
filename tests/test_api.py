@@ -101,7 +101,8 @@ def test_full_import_validate_push(client, fake_tally, tmp_path):
     r = client.post("/api/imports/%d/push" % import_id, json={}).get_json()
     assert r["pushed"] == 4 and r["failed"] == 0 and r["status"] == "pushed"
     assert len(fake_tally.vouchers) == 4
-    assert {v["vouchertypename"] for v in fake_tally.vouchers} == {"Payment", "Receipt"}
+    # ATM withdrawal to the Cash ledger is a cash/bank transfer: Contra
+    assert sorted(v["vouchertypename"] for v in fake_tally.vouchers) == ["Contra", "Payment", "Payment", "Receipt"]
 
     # pushed entries are locked
     patch = client.patch("/api/imports/%d/entries/%d" % (import_id, atm["id"]), json={"ledger": "Office Rent"})
@@ -268,3 +269,114 @@ def test_ledger_column_mapping(client, fake_tally, tmp_path):
     entries = {e["txn_date"]: e for e in client.get("/api/imports/%d" % r["import_id"]).get_json()["entries"]}
     assert entries["2026-04-03"]["ledger"] == "Acme Traders"  # from narration suggestion
     assert r["unmatched_ledgers"] == 0
+
+
+def test_contra_for_cash_and_bank_ledgers(client, fake_tally, tmp_path):
+    # a bank ledger two levels down: Bank Accounts > Current Accounts > ICICI Current
+    fake_tally.groups["Current Accounts"] = "Bank Accounts"
+    fake_tally.ledgers["ICICI Current"] = {"parent": "Current Accounts", "openingbalance": "0"}
+    r = client.post("/api/ledgers/fetch", json={"company": COMPANY}).get_json()
+    assert r["cash_bank"] == 3
+    flags = {l["name"]: l["cash_bank"] for l in client.get("/api/ledgers?company=" + COMPANY).get_json()["ledgers"]}
+    assert flags == {"Cash": 1, "HDFC Bank": 1, "ICICI Current": 1, "Office Rent": 0,
+                     "Amazon Web Services": 0, "Acme Traders": 0}
+
+    import_id = _upload(client, tmp_path).get_json()["import_id"]
+    entries = {e["txn_date"]: e for e in client.get("/api/imports/%d" % import_id).get_json()["entries"]}
+    atm, deposit = entries["2026-04-07"], entries["2026-04-03"]
+    url = "/api/imports/%d/entries/%%d" % import_id
+
+    # choosing a cash/bank ledger switches the row to Contra; choosing another switches back
+    assert client.patch(url % atm["id"], json={"ledger": "Cash"}).get_json()["entry"]["voucher_type"] == "Contra"
+    assert client.patch(url % atm["id"], json={"ledger": "Office Rent"}).get_json()["entry"]["voucher_type"] == "Payment"
+    assert client.patch(url % deposit["id"], json={"ledger": "ICICI Current"}).get_json()["entry"]["voucher_type"] == "Contra"
+
+    # validation: Contra needs a cash/bank ledger, and cash/bank ledgers need Contra
+    v = "/api/imports/%d/validate" % import_id
+    r = client.post(v, json={"entry_ids": [atm["id"]], "ledgers": {str(atm["id"]): "Office Rent"},
+                             "voucher_types": {str(atm["id"]): "Contra"}}).get_json()
+    assert r["invalid"] == 1
+    err = [e for e in client.get("/api/imports/%d" % import_id).get_json()["entries"] if e["id"] == atm["id"]][0]["error"]
+    assert "Contra is only for transfers with cash or bank ledgers" in err
+    r = client.post(v, json={"entry_ids": [atm["id"]], "ledgers": {str(atm["id"]): "Cash"},
+                             "voucher_types": {str(atm["id"]): "Payment"}}).get_json()
+    assert r["invalid"] == 1
+    r = client.post(v, json={"entry_ids": [atm["id"], deposit["id"]],
+                             "ledgers": {str(atm["id"]): "Cash", str(deposit["id"]): "ICICI Current"}}).get_json()
+    assert r["validated"] == 2
+
+    r = client.post("/api/imports/%d/push" % import_id, json={"entry_ids": [atm["id"], deposit["id"]]}).get_json()
+    assert r["pushed"] == 2
+    lines = {v["vouchertypename"] + ":" + v["allledgerentries"][0]["ledgername"]: v["allledgerentries"]
+             for v in fake_tally.vouchers}
+    # cash withdrawal from HDFC: Dr Cash, Cr HDFC Bank
+    w = lines["Contra:Cash"]
+    assert [(l["ledgername"], l["isdeemedpositive"], l["amount"]) for l in w] == \
+        [("Cash", "Yes", "-2000.00"), ("HDFC Bank", "No", "2000.00")]
+    # transfer in from ICICI: Dr HDFC Bank, Cr ICICI Current
+    d = lines["Contra:HDFC Bank"]
+    assert [(l["ledgername"], l["isdeemedpositive"], l["amount"]) for l in d] == \
+        [("HDFC Bank", "Yes", "-12000.00"), ("ICICI Current", "No", "12000.00")]
+
+
+def test_mapped_cash_ledger_imports_as_contra(client, fake_tally, tmp_path):
+    client.post("/api/ledgers/fetch", json={"company": COMPANY})
+    import openpyxl
+    path = str(tmp_path / "c.xlsx")
+    wb = openpyxl.Workbook()
+    wb.active.append(["Date", "Narration", "Withdrawal", "Deposit", "Ledger"])
+    wb.active.append(["07/04/2026", "ATM WDL", 2000, None, "cash"])
+    wb.active.append(["08/04/2026", "CASH DEPOSIT", None, 5000, "Cash"])
+    wb.save(path)
+    p = _preview(client, path, "c.xlsx").get_json()
+    r = client.post("/api/imports", data={"company": COMPANY, "bank_ledger": "HDFC Bank", "token": p["token"],
+                                          "mapping": json.dumps(p["mapping"]), "header_row": "0"}).get_json()
+    entries = client.get("/api/imports/%d" % r["import_id"]).get_json()["entries"]
+    assert [(e["ledger"], e["voucher_type"]) for e in entries] == [("Cash", "Contra"), ("Cash", "Contra")]
+
+
+def test_old_database_is_migrated(tmp_path):
+    import sqlite3
+    import db as dbmod
+    path = str(tmp_path / "old.db")
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE ledgers (id INTEGER PRIMARY KEY, company TEXT, name TEXT, parent TEXT, "
+                 "opening_balance REAL, closing_balance REAL, guid TEXT, fetched_at TEXT, UNIQUE (company, name))")
+    conn.execute("INSERT INTO ledgers (company, name, parent) VALUES ('X', 'Cash', 'Cash-in-Hand'), "
+                 "('X', 'Rent', 'Indirect Expenses')")
+    conn.commit()
+    conn.close()
+    dbmod.init_db(path)
+    dbmod.init_db(path)  # running again is harmless
+    conn = sqlite3.connect(path)
+    assert conn.execute("SELECT name, cash_bank FROM ledgers ORDER BY name").fetchall() == [("Cash", 1), ("Rent", 0)]
+
+
+def test_opening_import_switches_cash_bank_rows_to_contra(app, client, fake_tally, tmp_path):
+    """Rows saved before Contra existed (or before ledgers were re-fetched) are corrected on open."""
+    import db as dbmod
+    client.post("/api/ledgers/fetch", json={"company": COMPANY})
+    import_id = _upload(client, tmp_path).get_json()["import_id"]
+    entries = {e["txn_date"]: e for e in client.get("/api/imports/%d" % import_id).get_json()["entries"]}
+    atm, rent = entries["2026-04-07"], entries["2026-04-05"]
+    with app.app_context():
+        # old data: ATM row on Cash saved as a validated Payment; rent row wrongly Contra;
+        # and the cash/bank flag missing (as after an upgrade without re-fetching)
+        dbmod.execute("UPDATE entries SET ledger = 'Cash', voucher_type = 'Payment', status = 'validated' "
+                      "WHERE id = ?", (atm["id"],))
+        dbmod.execute("UPDATE entries SET voucher_type = 'Contra' WHERE id = ?", (rent["id"],))
+        dbmod.execute("UPDATE ledgers SET cash_bank = 0")
+
+    r = client.get("/api/imports/%d" % import_id).get_json()
+    assert r["voucher_types_corrected"] == 2
+    got = {e["id"]: (e["voucher_type"], e["status"]) for e in r["entries"]}
+    assert got[atm["id"]] == ("Contra", "pending")      # re-validate after the change
+    assert got[rent["id"]] == ("Payment", "pending")
+    assert client.get("/api/imports/%d" % import_id).get_json()["voucher_types_corrected"] == 0
+
+    # pushed rows are never touched
+    client.post("/api/imports/%d/validate" % import_id, json={"entry_ids": [atm["id"]]})
+    client.post("/api/imports/%d/push" % import_id, json={"entry_ids": [atm["id"]]})
+    with app.app_context():
+        dbmod.execute("UPDATE entries SET voucher_type = 'Payment' WHERE id = ?", (atm["id"],))
+    assert client.get("/api/imports/%d" % import_id).get_json()["voucher_types_corrected"] == 0

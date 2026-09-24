@@ -11,12 +11,13 @@ from werkzeug.utils import secure_filename
 import db
 from routes import ApiError, body, exchange, require_company, tally
 from services import ledger_matcher
+from services.ledger_groups import CASH_BANK_GROUPS
 from services.statement_parser import ParseError, inspect_statement, parse_date, parse_statement
 from services.tally_client import TallyError
 
 bp = Blueprint("api_imports", __name__, url_prefix="/api/imports")
 
-VOUCHER_TYPES = ("Payment", "Receipt")
+VOUCHER_TYPES = ("Payment", "Receipt", "Contra")
 MAPPABLE_FIELDS = ["txn_date", "narration", "ref_no", "debit", "credit", "balance", "amount", "drcr", "ledger"]
 PREVIEW_SAMPLE_ROWS = 15
 EDITABLE = ("txn_date", "narration", "ref_no", "debit", "credit", "ledger", "voucher_type")
@@ -42,6 +43,44 @@ def _ledger_names(company):
     return [r["name"] for r in db.query("SELECT name FROM ledgers WHERE company = ?", (company,))]
 
 
+def _cash_bank_names(company):
+    """Ledgers under Cash-in-Hand / Bank Accounts / Bank OD / Bank OCC (they take Contra vouchers).
+
+    Uses the flag set on Fetch from Tally (which also covers sub-groups), plus any ledger whose own
+    group is one of those, so it works even before ledgers are fetched again after an upgrade.
+    """
+    groups = sorted(CASH_BANK_GROUPS)
+    return {r["name"] for r in db.query(
+        "SELECT name FROM ledgers WHERE company = ? AND (cash_bank = 1 OR lower(parent) IN (%s))"
+        % ",".join("?" * len(groups)), [company] + groups)}
+
+
+def _sync_voucher_types(imp):
+    """Make open entries' voucher types agree with their ledgers: Contra for cash/bank ledgers,
+    Payment/Receipt otherwise. Validated entries that change go back to pending. Returns the count."""
+    cash_bank = _cash_bank_names(imp["company"])
+    changed = 0
+    for e in db.query("SELECT id, ledger, voucher_type, debit, status FROM entries WHERE import_id = ? "
+                      "AND status IN ('pending', 'validated', 'failed') AND ledger != ''", (imp["id"],)):
+        is_cb = e["ledger"] in cash_bank
+        if is_cb == (e["voucher_type"] == "Contra"):
+            continue
+        status = "pending" if e["status"] == "validated" else e["status"]
+        db.execute("UPDATE entries SET voucher_type = ?, status = ? WHERE id = ?",
+                   (default_voucher_type(e["ledger"], e["debit"], cash_bank), status, e["id"]))
+        changed += 1
+    if changed:
+        _refresh_status(imp["id"])
+    return changed
+
+
+def default_voucher_type(ledger, debit, cash_bank):
+    """Contra for cash/bank ledgers, else Payment for withdrawals and Receipt for deposits."""
+    if ledger and ledger in cash_bank:
+        return "Contra"
+    return "Payment" if float(debit or 0) > 0 else "Receipt"
+
+
 def _rules(company):
     return {r["keyword"]: r["ledger"] for r in
             db.query("SELECT keyword, ledger FROM ledger_rules WHERE company = ?", (company,))}
@@ -64,8 +103,11 @@ def _refresh_status(import_id):
     return status
 
 
-def validate_entry(entry, ledger_names, bank_ledger):
-    """Return a list of problems with an entry (empty list = valid)."""
+def validate_entry(entry, ledger_names, bank_ledger, cash_bank=frozenset()):
+    """Return a list of problems with an entry (empty list = valid).
+
+    cash_bank: names of cash/bank ledgers. Those need a Contra voucher, and Contra needs one of them.
+    """
     problems = []
     if not parse_date(entry.get("txn_date")):
         problems.append("invalid date")
@@ -79,13 +121,18 @@ def validate_entry(entry, ledger_names, bank_ledger):
         problems.append("ledger '%s' not found in Tally ledgers (fetch ledgers again?)" % ledger)
     elif ledger == bank_ledger:
         problems.append("ledger cannot be the bank ledger itself")
-    expected = "Payment" if debit > 0 else "Receipt"
-    if entry.get("voucher_type") not in VOUCHER_TYPES:
-        problems.append("voucher type must be Payment or Receipt")
-    elif debit or credit:
-        if entry["voucher_type"] != expected:
-            problems.append("%s voucher does not match a %s" %
-                            (entry["voucher_type"], "withdrawal" if debit > 0 else "deposit"))
+    vtype = entry.get("voucher_type")
+    if vtype not in VOUCHER_TYPES:
+        problems.append("voucher type must be Payment, Receipt or Contra")
+    elif ledger in ledger_names and ledger != bank_ledger:
+        if vtype == "Contra" and ledger not in cash_bank:
+            problems.append("Contra is only for transfers with cash or bank ledgers; '%s' is not one" % ledger)
+        elif vtype != "Contra" and ledger in cash_bank:
+            problems.append("'%s' is a cash/bank ledger: use a Contra voucher" % ledger)
+    if vtype in ("Payment", "Receipt") and (debit or credit):
+        expected = "Payment" if debit > 0 else "Receipt"
+        if vtype != expected:
+            problems.append("%s voucher does not match a %s" % (vtype, "withdrawal" if debit > 0 else "deposit"))
     return problems
 
 
@@ -228,6 +275,7 @@ def create_import():
             raise ApiError("Could not read the file: %s" % exc, 422)
 
     rules = _rules(company)
+    cash_bank = _cash_bank_names(company)
     by_lower = {n.lower(): n for n in ledger_names}
     unmatched = 0
     conn = db.get_db()
@@ -257,7 +305,7 @@ def create_import():
                 "INSERT INTO entries (import_id, txn_date, narration, ref_no, debit, credit, balance, ledger, "
                 "voucher_type, status, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (import_id, row["txn_date"], row["narration"], row["ref_no"], row["debit"], row["credit"],
-                 row["balance"], ledger, "Payment" if row["debit"] > 0 else "Receipt",
+                 row["balance"], ledger, default_voucher_type(ledger, row["debit"], cash_bank),
                  "skipped" if dup else "pending", note))
     message = "Imported %d entries." % len(rows)
     if unmatched:
@@ -271,8 +319,11 @@ def create_import():
 @bp.get("/<int:import_id>")
 def get_import(import_id):
     imp = _get_import(import_id)
+    corrected = _sync_voucher_types(imp)
+    if corrected:
+        imp = _get_import(import_id)
     entries = db.query("SELECT * FROM entries WHERE import_id = ? ORDER BY txn_date, id", (import_id,))
-    return jsonify({"import": imp, "entries": entries})
+    return jsonify({"import": imp, "entries": entries, "voucher_types_corrected": corrected})
 
 
 @bp.delete("/<int:import_id>")
@@ -295,6 +346,11 @@ def update_entry(import_id, entry_id):
                 changes[k] = round(float(changes[k] or 0), 2)
             except (TypeError, ValueError):
                 raise ApiError("%s must be a number." % k.title())
+    if "ledger" in changes and "voucher_type" not in changes:
+        # ledger changed without an explicit type: Contra for cash/bank ledgers, else Payment/Receipt
+        imp = _get_import(import_id)
+        debit = changes.get("debit", entry["debit"])
+        changes["voucher_type"] = default_voucher_type(changes["ledger"], debit, _cash_bank_names(imp["company"]))
     if "txn_date" in changes:
         changes["txn_date"] = parse_date(changes["txn_date"]) or changes["txn_date"]
     status = data.get("status")
@@ -332,6 +388,7 @@ def validate(import_id):
     ledgers = {int(k): v for k, v in (data.get("ledgers") or {}).items()}
     vtypes = {int(k): v for k, v in (data.get("voucher_types") or {}).items()}
     ledger_names = set(_ledger_names(imp["company"]))
+    cash_bank = _cash_bank_names(imp["company"])
 
     results = {"validated": 0, "invalid": 0}
     conn = db.get_db()
@@ -343,9 +400,11 @@ def validate(import_id):
             entry = dict(row)
             if eid in ledgers:
                 entry["ledger"] = (ledgers[eid] or "").strip()
+                if eid not in vtypes:  # ledger changed, type not given: pick the matching type
+                    entry["voucher_type"] = default_voucher_type(entry["ledger"], entry["debit"], cash_bank)
             if eid in vtypes:
                 entry["voucher_type"] = vtypes[eid]
-            problems = validate_entry(entry, ledger_names, imp["bank_ledger"])
+            problems = validate_entry(entry, ledger_names, imp["bank_ledger"], cash_bank)
             status = "invalid" if problems else "validated"
             conn.execute("UPDATE entries SET ledger = ?, voucher_type = ?, status = ?, error = ? WHERE id = ?",
                          (entry["ledger"], entry["voucher_type"],
@@ -378,9 +437,10 @@ def push(import_id):
 
     client = tally()
     ledger_names = set(_ledger_names(company))
+    cash_bank = _cash_bank_names(company)
     pushed = failed = 0
     for entry in entries:
-        problems = validate_entry(entry, ledger_names, imp["bank_ledger"])
+        problems = validate_entry(entry, ledger_names, imp["bank_ledger"], cash_bank)
         if problems:
             db.execute("UPDATE entries SET status = 'pending', error = ? WHERE id = ?",
                        ("; ".join(problems), entry["id"]))

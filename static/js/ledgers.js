@@ -41,7 +41,7 @@
     $("ledger-rows").innerHTML = rows.length ? rows.map((l) => `
       <tr>
         <td>${esc(l.name)}</td>
-        <td>${esc(l.parent)}</td>
+        <td>${esc(l.parent)}${l.cash_bank ? ` <span class="badge" title="Cash/bank ledger: statement lines with it are Contra vouchers">cash/bank</span>` : ""}</td>
         <td class="num">${drcr(l.opening_balance)}</td>
         <td class="num">${drcr(l.closing_balance)}</td>
         <td class="small muted">${esc(l.fetched_at || "")}</td>

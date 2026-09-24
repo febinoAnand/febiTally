@@ -3,6 +3,8 @@ from flask import Blueprint, jsonify, request
 
 import db
 from routes import ApiError, body, call_tally, exchange, require_company, tally
+from services.ledger_groups import is_cash_bank_group
+from services.tally_client import TallyError
 
 bp = Blueprint("api_ledgers", __name__, url_prefix="/api/ledgers")
 
@@ -12,6 +14,14 @@ def _get_ledger(ledger_id):
     if not row:
         raise ApiError("Ledger not found.", 404)
     return row
+
+
+def _group_parents(client, company):
+    """Group hierarchy from Tally; {} if unavailable (then only the direct group is checked)."""
+    try:
+        return client.group_parents(company)
+    except TallyError:
+        return {}
 
 
 def _parse_form(data):
@@ -54,16 +64,20 @@ def fetch():
     company = require_company(body(request).get("company"))
     client = tally()
     ledgers = call_tally(client, client.list_ledgers, company)
+    raw = exchange(client)  # the ledger response, before the groups request replaces it
+    groups = _group_parents(client, company)
     conn = db.get_db()
     with conn:
         conn.execute("DELETE FROM ledgers WHERE company = ?", (company,))
         conn.executemany(
             "INSERT OR REPLACE INTO ledgers (company, name, parent, opening_balance, closing_balance, guid, "
-            "fetched_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
-            [(company, l["name"], l["parent"], l["opening_balance"], l["closing_balance"], l["guid"])
-             for l in ledgers if l["name"]])
-    return jsonify(dict(exchange(client), company=company, count=len(ledgers),
-                        message="Fetched %d ledgers from Tally (%s)." % (len(ledgers), client.fmt.upper())))
+            "cash_bank, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+            [(company, l["name"], l["parent"], l["opening_balance"], l["closing_balance"], l["guid"],
+              int(is_cash_bank_group(l["parent"], groups))) for l in ledgers if l["name"]])
+    cash_bank = sum(1 for l in ledgers if is_cash_bank_group(l["parent"], groups))
+    return jsonify(dict(raw, company=company, count=len(ledgers), cash_bank=cash_bank,
+                        message="Fetched %d ledgers from Tally (%s), %d cash/bank."
+                                % (len(ledgers), client.fmt.upper(), cash_bank)))
 
 
 @bp.post("")
@@ -75,10 +89,12 @@ def create():
         raise ApiError("Ledger '%s' already exists." % name)
     client = tally()
     call_tally(client, client.create_ledger, company, name, parent, opening)
+    raw = exchange(client)
+    cash_bank = int(is_cash_bank_group(parent, _group_parents(client, company)))
     ledger_id = db.execute(
-        "INSERT INTO ledgers (company, name, parent, opening_balance, closing_balance) VALUES (?, ?, ?, ?, ?)",
-        (company, name, parent, opening, opening))
-    return jsonify(dict(exchange(client), ledger=_get_ledger(ledger_id),
+        "INSERT INTO ledgers (company, name, parent, opening_balance, closing_balance, cash_bank) "
+        "VALUES (?, ?, ?, ?, ?, ?)", (company, name, parent, opening, opening, cash_bank))
+    return jsonify(dict(raw, ledger=_get_ledger(ledger_id),
                         message="Ledger created in Tally (%s)." % client.fmt.upper())), 201
 
 
@@ -93,15 +109,17 @@ def update(ledger_id):
     client = tally()
     call_tally(client, client.alter_ledger, company, current["name"], parent, opening,
                new_name=name if name != current["name"] else None)
-    db.execute("UPDATE ledgers SET name = ?, parent = ?, opening_balance = ? WHERE id = ?",
-               (name, parent, opening, ledger_id))
+    raw = exchange(client)
+    cash_bank = int(is_cash_bank_group(parent, _group_parents(client, company)))
+    db.execute("UPDATE ledgers SET name = ?, parent = ?, opening_balance = ?, cash_bank = ? WHERE id = ?",
+               (name, parent, opening, cash_bank, ledger_id))
     if name != current["name"]:
         # keep pending statement entries and learned rules pointing at the renamed ledger
         db.execute("UPDATE entries SET ledger = ? WHERE ledger = ? AND status != 'pushed' AND import_id IN "
                    "(SELECT id FROM imports WHERE company = ?)", (name, current["name"], company))
         db.execute("UPDATE ledger_rules SET ledger = ? WHERE ledger = ? AND company = ?",
                    (name, current["name"], company))
-    return jsonify(dict(exchange(client), ledger=_get_ledger(ledger_id),
+    return jsonify(dict(raw, ledger=_get_ledger(ledger_id),
                         message="Ledger updated in Tally (%s)." % client.fmt.upper()))
 
 

@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS ledgers (
     opening_balance REAL DEFAULT 0,
     closing_balance REAL DEFAULT 0,
     guid            TEXT,
+    cash_bank       INTEGER DEFAULT 0,
     fetched_at      TEXT DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (company, name)
 );
@@ -76,10 +77,25 @@ def close_db(_exc=None):
         conn.close()
 
 
+# Columns added after the first release: (table, column, definition, backfill SQL or None).
+# Applied to older databases. Ledgers in cash/bank sub-groups get flagged on the next Fetch from Tally.
+MIGRATIONS = [
+    ("ledgers", "cash_bank", "INTEGER DEFAULT 0",
+     "UPDATE ledgers SET cash_bank = 1 WHERE lower(parent) IN "
+     "('cash-in-hand', 'bank accounts', 'bank od a/c', 'bank occ a/c')"),
+]
+
+
 def init_db(path):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     conn = _connect(path)
     conn.executescript(SCHEMA)
+    for table, column, definition, backfill in MIGRATIONS:
+        existing = {r["name"] for r in conn.execute("PRAGMA table_info(%s)" % table)}
+        if column not in existing:
+            conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, column, definition))
+            if backfill:
+                conn.execute(backfill)
     conn.commit()
     conn.close()
 

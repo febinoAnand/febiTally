@@ -41,6 +41,15 @@ If the statement has its own ledger column, map it to **Ledger (Tally)** in the 
 
 In the review table, a row whose ledger is not in Tally shows a **+ Create "…" in Tally** button. That covers a typed name or an unmatched name from the statement's Ledger column. Pressing **Enter** in the Ledger box does the same. The dialog asks for the name, group and opening balance, creates the ledger in Tally, and assigns it to the row. It can also assign it to other rows that want the same name.
 
+**Voucher types.**
+- A withdrawal becomes a **Payment** and a deposit a **Receipt**.
+- When the row's ledger is a cash or bank ledger, the voucher type becomes **Contra**. That means cash withdrawals, cash deposits and transfers between banks. A cash or bank ledger is one under Cash-in-Hand, Bank Accounts, Bank OD A/c or Bank OCC A/c, including their sub-groups.
+- The type is set automatically: the Voucher dropdown switches as soon as the Ledger box matches a ledger, whether typed or picked.
+- Opening an import also corrects any open rows whose type doesn't match their ledger. Validated rows that change go back to *pending*, and pushed rows are never changed.
+- Validation rejects Contra with a non-cash/bank ledger, and Payment/Receipt with a cash/bank ledger.
+- Cash/bank ledgers are marked on the Ledgers page and in the ledger suggestions.
+- After upgrading, click **Fetch from Tally** once so ledgers in bank sub-groups are recognised.
+
 For entries with no ledger from the statement, ledgers are suggested automatically in two ways:
 - when a ledger name appears in the narration,
 - from keywords learned from earlier validated entries.

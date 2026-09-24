@@ -29,6 +29,9 @@ class FakeTally:
             "Amazon Web Services": {"parent": "Indirect Expenses", "openingbalance": "0"},
             "Acme Traders": {"parent": "Sundry Debtors", "openingbalance": "-2500.00"},
         }
+        # group -> parent; primary groups report "Primary" (with Tally's leading control character)
+        self.groups = {"Bank Accounts": "\x04 Primary", "Cash-in-Hand": "\x04 Primary",
+                       "Indirect Expenses": "\x04 Primary", "Sundry Debtors": "\x04 Primary"}
         self.vouchers = []
         self.requests = []
         self.fail_voucher_ledger = None
@@ -57,8 +60,8 @@ class FakeTally:
                  "guid": "guid-" + n}
                 for n, v in self.ledgers.items()]}}
         if headers["id"] == tally_client.COLLECTION_GROUPS:
-            return {"status": "1", "data": {"collection": [{"metadata": {"name": g}} for g in
-                                                           ["Bank Accounts", "Indirect Expenses", "Sundry Debtors"]]}}
+            return {"status": "1", "data": {"collection": [{"metadata": {"name": g}, "parent": p}
+                                                           for g, p in self.groups.items()]}}
         return {"status": "0", "error": "unknown collection"}
 
     def _import(self, headers, payload):
@@ -108,7 +111,8 @@ class FakeTally:
                 out.append('<%s NAME="%s" RESERVEDNAME="">' % (kind.upper(), name))
                 for k, v in obj.items():
                     if k != "metadata":
-                        out.append('<%s TYPE="String">%s</%s>' % (k.upper(), v, k.upper()))
+                        out.append('<%s TYPE="String">%s</%s>' % (k.upper(), str(v).replace("\x04", "&#4;"),
+                                                                  k.upper()))
                 out.append("</%s>" % kind.upper())
             out.append("</COLLECTION></DATA></BODY></ENVELOPE>")
             return "".join(out)

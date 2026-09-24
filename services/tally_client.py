@@ -203,15 +203,17 @@ def build_ledger_import(company, action, name, parent=None, opening_balance=None
 
 
 def build_voucher(bank_ledger, entry):
-    """Build one Payment/Receipt voucher from a statement entry.
+    """Build one Payment / Receipt / Contra voucher from a statement entry.
 
     Tally sign convention: debit lines carry isdeemedpositive=Yes and a negative amount.
-    Payment (money out of bank): Dr party ledger, Cr bank.
-    Receipt (money into bank):   Dr bank, Cr party ledger.
+    The direction follows the statement:
+    money out of the bank (withdrawal): Dr the row's ledger, Cr bank   (Payment, or Contra to cash/other bank)
+    money into the bank (deposit):      Dr bank, Cr the row's ledger   (Receipt, or Contra from cash/other bank)
     """
     vtype = entry["voucher_type"]
+    withdrawal = float(entry["debit"] or 0) > 0
     amount = float(entry["debit"] or 0) or float(entry["credit"] or 0)
-    if vtype == "Payment":
+    if withdrawal:
         dr_ledger, cr_ledger = entry["ledger"], bank_ledger
     else:
         dr_ledger, cr_ledger = bank_ledger, entry["ledger"]
@@ -353,9 +355,18 @@ class TallyClient:
         objs = extract_objects(data)
         return self._ledger_from(objs[0]) if objs else None
 
-    def list_groups(self, company):
+    def group_parents(self, company):
+        """{group name: parent group name} for every group of the company ('' for primary groups)."""
         data = self.post(*build_export(company, "Collection", COLLECTION_GROUPS, fetch_list=["Name", "Parent"]))
-        return sorted({str(_field(o, "name")).strip() for o in extract_objects(data)})
+        parents = {}
+        for obj in extract_objects(data):
+            name = str(_field(obj, "name")).strip()
+            parent = re.sub(r"^[\x00-\x1f\s]*primary$", "", str(_field(obj, "parent") or "").strip(), flags=re.I)
+            parents[name] = parent.strip()
+        return parents
+
+    def list_groups(self, company):
+        return sorted(self.group_parents(company))
 
     @staticmethod
     def _ledger_from(obj):
