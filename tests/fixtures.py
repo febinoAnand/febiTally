@@ -27,6 +27,19 @@ def make_excel(path):
     return path
 
 
+def make_excel_with_ledger(path):
+    """User-prepared sheet with a Ledger column (one wrong case, one unknown, one blank)."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["Date", "Particulars", "Withdrawal", "Deposit", "Balance", "Ledger Name"])
+    ws.append(["01/04/2026", "NEFT-AWS INDIA", 8500.00, None, 91500.00, "Amazon Web Services"])
+    ws.append(["03/04/2026", "UPI/ACME TRADERS/Payment", None, 12000.00, 103500.00, "acme traders"])
+    ws.append(["05/04/2026", "CHQ PAID-OFFICE RENT APRIL", 25000.00, None, 78500.00, "Rent Account"])
+    ws.append(["07/04/2026", "ATM WDL MG ROAD", 2000.00, None, 76500.00, ""])
+    wb.save(path)
+    return path
+
+
 def make_csv_single_amount(path):
     with open(path, "w") as f:
         f.write("Txn Date,Description,Amount,Dr/Cr,Balance\n")
@@ -73,6 +86,7 @@ if __name__ == "__main__":
     os.makedirs(out, exist_ok=True)
     make_excel(os.path.join(out, "sample_statement.xlsx"))
     make_csv_single_amount(os.path.join(out, "sample_statement.csv"))
+    make_excel_with_ledger(os.path.join(out, "sample_statement_with_ledger.xlsx"))
     make_pdf_table(os.path.join(out, "sample_statement.pdf"))
     make_pdf_text(os.path.join(out, "sample_statement_text.pdf"))
     print("Samples written to", out)

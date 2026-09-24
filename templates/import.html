@@ -42,7 +42,7 @@
         <input type="file" id="file" accept=".pdf,.xlsx,.xls,.csv" hidden>
       </label>
       <div class="toolbar" style="margin-top:14px">
-        <button class="btn btn-primary" id="upload-btn" disabled>Upload &amp; parse</button>
+        <button class="btn btn-primary" id="upload-btn" disabled>Upload &amp; map columns</button>
       </div>
     </div>
   </div>
@@ -106,18 +106,37 @@
 
 <!-- Column mapping -->
 <div class="modal-backdrop hidden" id="mapping-modal">
-  <div class="modal wide">
-    <div class="modal-head"><h2>Map statement columns</h2><button class="close-x" data-close="mapping-modal">&times;</button></div>
-    <div class="modal-body">
-      <div class="alert alert-warning" id="mapping-msg"></div>
-      <div class="row" id="mapping-fields"></div>
-      <div class="table-wrap" style="max-height:280px;border:1px solid var(--border);border-radius:8px">
-        <table class="small" id="mapping-preview"></table>
+  <div class="modal xwide" role="dialog" aria-labelledby="map-title">
+    <div class="modal-head">
+      <div>
+        <h2 id="map-title">Map statement columns</h2>
+        <div class="muted small" id="map-sub"></div>
       </div>
+      <button class="close-x" data-close="mapping-modal">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div id="map-alert"></div>
+      <div id="map-controls">
+        <div class="row" style="margin-bottom:4px">
+          <div class="field" style="max-width:320px">
+            <label for="map-header-row">Header row</label>
+            <select id="map-header-row"></select>
+            <div class="help">The row with the column titles; transactions start below it. You can also click a row in the file preview.</div>
+          </div>
+        </div>
+        <div class="map-grid" id="map-fields"></div>
+      </div>
+      <div id="map-raw-wrap">
+        <h3 class="section-title">File preview <span class="muted small" id="map-raw-note"></span></h3>
+        <div class="table-wrap map-table"><table class="small" id="map-raw"></table></div>
+      </div>
+      <h3 class="section-title">Parsed entries <span class="muted small" id="map-count"></span></h3>
+      <div class="table-wrap map-table"><table class="small" id="map-sample"></table></div>
     </div>
     <div class="modal-foot">
+      <span class="muted small" id="map-status" style="margin-right:auto"></span>
       <button class="btn" data-close="mapping-modal">Cancel</button>
-      <button class="btn btn-primary" id="mapping-apply">Import with this mapping</button>
+      <button class="btn btn-primary" id="mapping-apply" disabled>Import entries</button>
     </div>
   </div>
 </div>

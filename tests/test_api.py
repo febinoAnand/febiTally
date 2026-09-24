@@ -1,4 +1,6 @@
 """End-to-end API flow against the in-memory FakeTally."""
+import json
+
 from tests import fixtures
 
 COMPANY = "Bhrama Enterprises"
@@ -183,3 +185,86 @@ def test_tally_error_carries_raw_response(client, fake_tally):
     body = r.get_json()
     assert r.status_code == 502 and body["error"] == "Duplicate ledger"
     assert "Duplicate ledger" in body["tally_response"] and body["format"] in ("json", "xml")
+
+
+def _preview(client, path, name):
+    with open(path, "rb") as f:
+        return client.post("/api/imports/preview", data={"file": (f, name)}, content_type="multipart/form-data")
+
+
+def test_mapping_dialog_flow(client, fake_tally, tmp_path):
+    client.post("/api/ledgers/fetch", json={"company": COMPANY})
+    r = _preview(client, fixtures.make_excel(str(tmp_path / "s.xlsx")), "s.xlsx")
+    assert r.status_code == 200
+    p = r.get_json()
+    # letterhead rows 0-2, header on row 3; detected mapping pre-filled for the dialog
+    assert p["detected"] and p["mode"] == "table" and p["header_row"] == 3
+    assert p["mapping"] == {"txn_date": 0, "narration": 1, "ref_no": 2, "debit": 3, "credit": 4, "balance": 5}
+    assert p["count"] == 4 and len(p["sample"]) == 4 and p["raw"][3][0] == "Date"
+    assert not client.get("/api/imports").get_json()["imports"]  # nothing imported yet
+
+    # user swaps withdrawal/deposit: preview reflects it
+    swapped = dict(p["mapping"], debit=4, credit=3)
+    r = client.post("/api/imports/preview", json={"token": p["token"], "mapping": swapped, "header_row": 3}).get_json()
+    assert r["count"] == 4 and r["sample"][0]["credit"] == 8500.0
+
+    # clearing every column is reported, not silently auto-detected
+    r = client.post("/api/imports/preview", json={"token": p["token"], "mapping": {}, "header_row": 3}).get_json()
+    assert r["count"] == 0 and "Date and Narration" in r["problem"]
+
+    # import with the confirmed mapping
+    r = client.post("/api/imports", data={"company": COMPANY, "bank_ledger": "HDFC Bank", "token": p["token"],
+                                          "mapping": json.dumps(p["mapping"]), "header_row": "3"})
+    assert r.status_code == 201 and r.get_json()["count"] == 4
+    imp = client.get("/api/imports/%d" % r.get_json()["import_id"]).get_json()
+    assert imp["import"]["filename"] == "s.xlsx"
+    assert [e["debit"] for e in imp["entries"]] == [8500.0, 0.0, 25000.0, 2000.0]
+
+
+def test_mapping_dialog_undetected_columns(client, fake_tally, tmp_path):
+    client.post("/api/ledgers/fetch", json={"company": COMPANY})
+    path = tmp_path / "odd.csv"
+    path.write_text("Bank of Nowhere\nWhen,What,How much\n01/04/2026,Something,100\n02/04/2026,Other,50\n")
+    p = _preview(client, str(path), "odd.csv").get_json()
+    assert not p["detected"] and p["count"] == 0 and "header row" in p["problem"]
+
+    mapping = {"txn_date": 0, "narration": 1, "debit": 2}
+    r = client.post("/api/imports/preview", json={"token": p["token"], "mapping": mapping, "header_row": 1}).get_json()
+    assert r["count"] == 2 and r["problem"] is None
+
+    bad = client.post("/api/imports", data={"company": COMPANY, "bank_ledger": "HDFC Bank", "token": p["token"],
+                                            "mapping": json.dumps({"narration": 1})})
+    assert bad.status_code == 422 and "Date and Narration" in bad.get_json()["error"]
+    r = client.post("/api/imports", data={"company": COMPANY, "bank_ledger": "HDFC Bank", "token": p["token"],
+                                          "mapping": json.dumps(mapping), "header_row": "1"})
+    assert r.status_code == 201 and r.get_json()["count"] == 2
+
+
+def test_mapping_dialog_rejects_bad_tokens(client, fake_tally):
+    assert client.post("/api/imports/preview", json={"token": "../../etc/passwd"}).status_code == 400
+    assert client.post("/api/imports/preview", json={"token": "0" * 32}).status_code == 410
+
+
+def test_ledger_column_mapping(client, fake_tally, tmp_path):
+    client.post("/api/ledgers/fetch", json={"company": COMPANY})
+    p = _preview(client, fixtures.make_excel_with_ledger(str(tmp_path / "l.xlsx")), "l.xlsx").get_json()
+    assert p["mapping"]["ledger"] == 5 and "ledger" in p["fields"]
+    assert [r["ledger"] for r in p["sample"]] == ["Amazon Web Services", "acme traders", "Rent Account", ""]
+
+    r = client.post("/api/imports", data={"company": COMPANY, "bank_ledger": "HDFC Bank", "token": p["token"],
+                                          "mapping": json.dumps(p["mapping"]), "header_row": "0"}).get_json()
+    assert r["unmatched_ledgers"] == 1 and "not found in Tally" in r["message"]
+    entries = {e["txn_date"]: e for e in client.get("/api/imports/%d" % r["import_id"]).get_json()["entries"]}
+    assert entries["2026-04-01"]["ledger"] == "Amazon Web Services"
+    assert entries["2026-04-03"]["ledger"] == "Acme Traders"          # matched ignoring case
+    assert entries["2026-04-05"]["ledger"] == "Office Rent"           # unknown -> suggestion from narration
+    assert "Rent Account" in entries["2026-04-05"]["error"]
+    assert entries["2026-04-07"]["ledger"] == "" and entries["2026-04-07"]["error"] is None
+
+    # without mapping the ledger column, the statement's ledger names are ignored
+    mapping = {k: v for k, v in p["mapping"].items() if k != "ledger"}
+    r = client.post("/api/imports", data={"company": COMPANY, "bank_ledger": "HDFC Bank", "token": p["token"],
+                                          "mapping": json.dumps(mapping), "header_row": "0"}).get_json()
+    entries = {e["txn_date"]: e for e in client.get("/api/imports/%d" % r["import_id"]).get_json()["entries"]}
+    assert entries["2026-04-03"]["ledger"] == "Acme Traders"  # from narration suggestion
+    assert r["unmatched_ledgers"] == 0

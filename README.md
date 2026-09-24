@@ -31,11 +31,15 @@ Test connection uses the format currently selected on the form.
 | Page | What it does |
 |---|---|
 | Dashboard | Tally connection status, entry counts by status, recent imports, ledgers cached per company |
-| Import Statement | 1. Pick the company (it must be open in Tally) and the bank ledger. 2. Upload the file. 3. Review the entries: pick a ledger per row, validate, then push to Tally. You can edit, skip or delete rows. Failed pushes show Tally's error and can be retried. |
+| Import Statement | 1. Pick the company (it must be open in Tally) and the bank ledger. 2. Upload the file. The **Map statement columns** dialog opens with the header row and columns already detected, a preview of the file, and a live preview of the parsed entries; adjust anything, then import. 3. Review the entries: pick a ledger per row, validate, then push to Tally. You can edit, skip or delete rows. Failed pushes show Tally's error and can be retried. |
 | Ledgers | Fetch all ledgers of a company from Tally. Create, edit and delete ledgers; every change is written to Tally first. |
 | Settings | Tally host, port and response format (JSON/XML), a connection test, and an API console for sending raw JSON or XML requests to Tally |
 
-An import is blocked until the company's ledgers have been fetched. Ledgers are suggested automatically in two ways:
+An import is blocked until the company's ledgers have been fetched.
+
+If the statement has its own ledger column, map it to **Ledger (Tally)** in the mapping dialog. Columns titled *Ledger*, *Ledger Name* or *Account Head* are detected automatically. Each value is matched to a fetched Tally ledger, ignoring upper/lower case. The dialog marks each name ✓ (found) or ✗ (not in Tally). An entry whose name is not found gets a suggested ledger instead and a note saying which name was not found.
+
+For entries with no ledger from the statement, ledgers are suggested automatically in two ways:
 - when a ledger name appears in the narration,
 - from keywords learned from earlier validated entries.
 
@@ -48,7 +52,7 @@ A statement line that matches an entry already imported for the same bank is mar
 - `services/statement_parser.py`:
   - detects columns (Date, Narration, Withdrawal/Deposit or Amount + Dr/Cr, Balance, Ref),
   - reads PDF tables, falling back to text lines for PDFs without tables,
-  - shows a manual column-mapping dialog when auto-detection fails.
+  - `inspect_statement` gives the mapping dialog the raw rows, the detected header row and columns, and parsed entries for any mapping.
 - `services/ledger_matcher.py`: ledger suggestions and learned keyword rules.
 - `routes/`: page routes and the JSON API (`/api/settings`, `/api/tally/*`, `/api/ledgers`, `/api/imports`).
 - `templates/`, `static/`: plain HTML, CSS and vanilla JS.

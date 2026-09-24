@@ -1,7 +1,9 @@
 """Bank statement imports: upload + parse, review, validate and push to Tally."""
 import json
 import os
+import re
 import time
+import uuid
 
 from flask import Blueprint, current_app, jsonify, request
 from werkzeug.utils import secure_filename
@@ -9,12 +11,14 @@ from werkzeug.utils import secure_filename
 import db
 from routes import ApiError, body, exchange, require_company, tally
 from services import ledger_matcher
-from services.statement_parser import ParseError, parse_date, parse_statement
+from services.statement_parser import ParseError, inspect_statement, parse_date, parse_statement
 from services.tally_client import TallyError
 
 bp = Blueprint("api_imports", __name__, url_prefix="/api/imports")
 
 VOUCHER_TYPES = ("Payment", "Receipt")
+MAPPABLE_FIELDS = ["txn_date", "narration", "ref_no", "debit", "credit", "balance", "amount", "drcr", "ledger"]
+PREVIEW_SAMPLE_ROWS = 15
 EDITABLE = ("txn_date", "narration", "ref_no", "debit", "credit", "ledger", "voucher_type")
 
 
@@ -96,9 +100,104 @@ def list_imports():
         "GROUP BY i.id ORDER BY i.id DESC")})
 
 
+UPLOAD_TTL_SECONDS = 2 * 24 * 3600
+TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _cleanup_uploads():
+    """Remove uploaded statements older than two days (previews that were never imported)."""
+    folder = current_app.config["UPLOAD_DIR"]
+    now = time.time()
+    for name in os.listdir(folder):
+        path = os.path.join(folder, name)
+        if "__" in name and os.path.isfile(path) and now - os.path.getmtime(path) > UPLOAD_TTL_SECONDS:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+def _save_upload(upload):
+    """Save an uploaded statement; returns (token, path)."""
+    if not upload or not upload.filename:
+        raise ApiError("Choose a statement file to upload.")
+    ext = os.path.splitext(upload.filename)[1].lower()
+    if ext not in current_app.config["ALLOWED_EXTENSIONS"]:
+        raise ApiError("Unsupported file type %s. Use PDF, XLSX, XLS or CSV." % ext)
+    token = uuid.uuid4().hex
+    name = secure_filename(upload.filename) or "statement" + ext
+    path = os.path.join(current_app.config["UPLOAD_DIR"], "%s__%s" % (token, name))
+    upload.save(path)
+    return token, path
+
+
+def _upload_path(token):
+    """Find a previously uploaded statement by its token; returns (path, original_name)."""
+    if not TOKEN_RE.match(token or ""):
+        raise ApiError("Invalid upload reference. Upload the file again.")
+    folder = current_app.config["UPLOAD_DIR"]
+    for name in os.listdir(folder):
+        if name.startswith(token + "__"):
+            return os.path.join(folder, name), name[len(token) + 2:]
+    raise ApiError("The uploaded file has expired. Upload it again.", 410)
+
+
+def _mapping_arg(raw, header_row_raw):
+    """Parse mapping ({field: column}) and header row from form/JSON values."""
+    mapping = None  # None = auto-detect; {} = user cleared every column
+    if raw not in (None, ""):
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+            mapping = {str(k): int(v) for k, v in data.items() if v not in ("", None)}
+        except (ValueError, TypeError, AttributeError):
+            raise ApiError("Invalid column mapping.")
+        unknown = set(mapping) - set(MAPPABLE_FIELDS)
+        if unknown:
+            raise ApiError("Unknown column field(s): %s" % ", ".join(sorted(unknown)))
+    header_row = None
+    if header_row_raw not in (None, ""):
+        try:
+            header_row = int(header_row_raw)
+        except (TypeError, ValueError):
+            raise ApiError("Invalid header row.")
+    return mapping, header_row
+
+
+def _inspect(path, mapping, header_row):
+    try:
+        return inspect_statement(path, mapping, header_row)
+    except Exception as exc:  # corrupt or password-protected files
+        raise ApiError("Could not read the file: %s" % exc, 422)
+
+
+@bp.post("/preview")
+def preview_import():
+    """Upload (or re-inspect) a statement for the column-mapping dialog. Nothing is imported.
+
+    multipart: file  — or form/JSON: token; optional mapping (JSON {field: column}), header_row.
+    """
+    data = request.form if request.files or request.form else body(request)
+    if request.files.get("file"):
+        _cleanup_uploads()
+        token, path = _save_upload(request.files["file"])
+        filename = request.files["file"].filename
+    else:
+        token = data.get("token")
+        path, filename = _upload_path(token)
+    mapping, header_row = _mapping_arg(data.get("mapping"), data.get("header_row"))
+    info, rows = _inspect(path, mapping, header_row)
+    return jsonify(dict(info, token=token, filename=filename, fields=MAPPABLE_FIELDS,
+                        sample=rows[:PREVIEW_SAMPLE_ROWS]))
+
+
 @bp.post("")
 def create_import():
-    """multipart/form-data: file, company, bank_ledger, [mapping (JSON {field: column_index})]."""
+    """Create an import from a statement.
+
+    multipart/form-data: company, bank_ledger, and either
+      token (from /preview) + mapping + header_row  — the mapping confirmed in the dialog, or
+      file [+ mapping]                              — direct upload with auto-detection.
+    """
     company = require_company(request.form.get("company"))
     bank_ledger = (request.form.get("bank_ledger") or "").strip()
 
@@ -109,38 +208,32 @@ def create_import():
     if bank_ledger not in ledger_names:
         raise ApiError("Select the bank ledger this statement belongs to.")
 
-    upload = request.files.get("file")
-    if not upload or not upload.filename:
-        raise ApiError("Choose a statement file to upload.")
-    ext = os.path.splitext(upload.filename)[1].lower()
-    if ext not in current_app.config["ALLOWED_EXTENSIONS"]:
-        raise ApiError("Unsupported file type %s. Use PDF, XLSX, XLS or CSV." % ext)
-
-    mapping = None
-    if request.form.get("mapping"):
+    mapping, header_row = _mapping_arg(request.form.get("mapping"), request.form.get("header_row"))
+    if request.form.get("token"):
+        path, filename = _upload_path(request.form["token"])
+        info, rows = _inspect(path, mapping, header_row)
+        if not rows:
+            raise ApiError(info["problem"] or "No transactions found with this column mapping.", 422)
+    else:
+        upload = request.files.get("file")
+        _token, path = _save_upload(upload)
+        filename = upload.filename
         try:
-            mapping = {k: int(v) for k, v in json.loads(request.form["mapping"]).items() if v not in ("", None)}
-        except (ValueError, TypeError, AttributeError):
-            raise ApiError("Invalid column mapping.")
-
-    filename = "%d_%s" % (int(time.time()), secure_filename(upload.filename) or "statement" + ext)
-    path = os.path.join(current_app.config["UPLOAD_DIR"], filename)
-    upload.save(path)
-
-    try:
-        rows = parse_statement(path, mapping)
-    except ParseError as exc:
-        os.remove(path)
-        raise ApiError(str(exc), 422, need_mapping=True, headers=exc.headers, preview=exc.preview)
-    except Exception as exc:  # corrupt or password-protected files
-        os.remove(path)
-        raise ApiError("Could not read the file: %s" % exc, 422)
+            rows = parse_statement(path, mapping, header_row)
+        except ParseError as exc:
+            os.remove(path)
+            raise ApiError(str(exc), 422, need_mapping=True, headers=exc.headers, preview=exc.preview)
+        except Exception as exc:  # corrupt or password-protected files
+            os.remove(path)
+            raise ApiError("Could not read the file: %s" % exc, 422)
 
     rules = _rules(company)
+    by_lower = {n.lower(): n for n in ledger_names}
+    unmatched = 0
     conn = db.get_db()
     with conn:
         cur = conn.execute("INSERT INTO imports (company, bank_ledger, filename) VALUES (?, ?, ?)",
-                           (company, bank_ledger, upload.filename))
+                           (company, bank_ledger, filename))
         import_id = cur.lastrowid
         for row in rows:
             dup = conn.execute(
@@ -149,16 +242,28 @@ def create_import():
                 "AND e.debit = ? AND e.credit = ? AND e.narration = ? AND e.status != 'skipped' LIMIT 1",
                 (company, bank_ledger, import_id, row["txn_date"], row["debit"], row["credit"],
                  row["narration"])).fetchone()
+            # ledger from the statement's own column when it names a Tally ledger, else a suggestion
+            given = row.get("ledger") or ""
+            ledger = by_lower.get(given.lower(), "")
+            note = None
+            if given and not ledger:
+                unmatched += 1
+                note = "Ledger '%s' from the statement is not a ledger in Tally" % given
+            if not ledger:
+                ledger = ledger_matcher.suggest(row["narration"], ledger_names, rules)
+            if dup:
+                note = "Possible duplicate of an entry in import #%d" % dup[0]
             conn.execute(
                 "INSERT INTO entries (import_id, txn_date, narration, ref_no, debit, credit, balance, ledger, "
                 "voucher_type, status, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (import_id, row["txn_date"], row["narration"], row["ref_no"], row["debit"], row["credit"],
-                 row["balance"], ledger_matcher.suggest(row["narration"], ledger_names, rules),
-                 "Payment" if row["debit"] > 0 else "Receipt",
-                 "skipped" if dup else "pending",
-                 "Possible duplicate of an entry in import #%d" % dup[0] if dup else None))
-    return jsonify({"import_id": import_id, "count": len(rows),
-                    "message": "Imported %d entries." % len(rows)}), 201
+                 row["balance"], ledger, "Payment" if row["debit"] > 0 else "Receipt",
+                 "skipped" if dup else "pending", note))
+    message = "Imported %d entries." % len(rows)
+    if unmatched:
+        message += " %d ledger name(s) from the statement were not found in Tally." % unmatched
+    return jsonify({"import_id": import_id, "count": len(rows), "unmatched_ledgers": unmatched,
+                    "message": message}), 201
 
 
 # --------------------------------------------------------------------------- one import

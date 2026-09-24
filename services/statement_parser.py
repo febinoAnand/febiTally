@@ -1,6 +1,7 @@
 """Bank statement parsing: PDF / Excel / CSV -> normalised rows.
 
-Output row: {txn_date: 'YYYY-MM-DD', narration, ref_no, debit, credit, balance}
+Output row: {txn_date: 'YYYY-MM-DD', narration, ref_no, debit, credit, balance, ledger}
+(`ledger` is the statement's own ledger column, '' when not mapped.)
 """
 import os
 import re
@@ -22,6 +23,8 @@ COLUMN_SYNONYMS = {
     "balance": ["closingbalance", "balance", "runningbalance", "balanceamt", "availablebalance"],
     "amount": ["amount", "txnamount", "transactionamount"],
     "drcr": ["drcr", "type", "crdr", "debitcredit"],
+    # optional: a column holding the Tally ledger for each line (common in user-prepared sheets)
+    "ledger": ["ledger", "ledgername", "tallyledger", "accounthead", "ledgeraccount", "ledgerhead"],
 }
 REQUIRED = ("txn_date", "narration")
 
@@ -95,25 +98,43 @@ def detect_columns(headers):
     return {}
 
 
-def rows_from_table(table, mapping=None):
+def _clean_table(table):
+    return [[("" if c is None else c) for c in row] for row in table if row is not None]
+
+
+def find_header(table, scan=40):
+    """Return (header_row_index, mapping) for the first row that looks like a header, or (None, {})."""
+    for i, row in enumerate(table[:scan]):
+        mapping = detect_columns(row)
+        if mapping:
+            return i, mapping
+    return None, {}
+
+
+def mapping_problem(mapping):
+    """Why a user-supplied mapping can't be used, or None."""
+    if not mapping or "txn_date" not in mapping or "narration" not in mapping:
+        return "Map at least the Date and Narration columns."
+    if not any(f in mapping for f in ("debit", "credit", "amount")):
+        return "Map the Withdrawal/Deposit columns, or a single Amount column."
+    return None
+
+
+def rows_from_table(table, mapping=None, header_row=None):
     """Convert a 2D list (first rows may be bank letterhead) into normalised entries.
 
-    `mapping` may be supplied by the user as {field: column_index}; otherwise the header row
-    is auto-detected by scanning the first 40 rows.
+    `mapping` may be supplied by the user as {field: column_index}, with `header_row` the index
+    of the header row (data starts below it); otherwise the header row is auto-detected.
     """
-    table = [[("" if c is None else c) for c in row] for row in table if row is not None]
-    start = 0
+    table = _clean_table(table)
     if not mapping:
-        for i, row in enumerate(table[:40]):
-            mapping = detect_columns(row)
-            if mapping:
-                start = i + 1
-                break
+        header_row, mapping = find_header(table)
     if not mapping:
         header_guess = next((r for r in table if sum(1 for c in r if str(c).strip()) >= 3), [])
         raise ParseError("Could not detect the statement columns. Please map them manually.",
                          headers=[str(c) for c in header_guess],
                          preview=[[str(c) for c in r] for r in table[:15]])
+    start = header_row + 1 if header_row is not None else 0
     return _normalise(table[start:], mapping)
 
 
@@ -158,6 +179,7 @@ def _normalise(rows, mapping):
             "debit": round(debit, 2),
             "credit": round(credit, 2),
             "balance": round(parse_amount(balance_raw), 2) if balance_raw not in (None, "") else None,
+            "ledger": re.sub(r"\s+", " ", str(_cell(row, mapping, "ledger") or "")).strip(),
         })
     return out
 
@@ -170,9 +192,7 @@ def read_table(path):
     if ext == ".pdf":
         return _read_pdf_tables(path)
     if ext == ".csv":
-        df = pd.read_csv(path, header=None, dtype=object, keep_default_na=False, skip_blank_lines=False,
-                         on_bad_lines="skip", encoding_errors="replace")
-        return df.values.tolist()
+        return _read_csv(path)
     if ext in (".xlsx", ".xls"):
         sheets = pd.read_excel(path, header=None, sheet_name=None, dtype=object)
         table = []
@@ -180,6 +200,26 @@ def read_table(path):
             table.extend(df.where(pd.notna(df), "").values.tolist())
         return table
     raise ParseError("Unsupported file type: %s" % ext)
+
+
+def _read_csv(path):
+    """CSV rows as lists. Uses the csv module (not pandas) because bank CSVs often start with
+    one-cell title lines, and rows of different lengths must all be kept."""
+    import csv
+
+    with open(path, "rb") as f:
+        raw = f.read()
+    for enc in ("utf-8-sig", "cp1252", "latin-1"):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    try:
+        dialect = csv.Sniffer().sniff(text[:8192], delimiters=",;\t|")
+    except csv.Error:
+        dialect = csv.excel
+    return [row for row in csv.reader(text.splitlines(), dialect)]
 
 
 def _read_pdf_tables(path):
@@ -239,12 +279,12 @@ def _read_pdf_lines(path):
     return entries
 
 
-def parse_statement(path, mapping=None):
+def parse_statement(path, mapping=None, header_row=None):
     """Parse a statement file. Raises ParseError (with headers/preview) when columns can't be found."""
     table = read_table(path)
     if path.lower().endswith(".pdf"):
         try:
-            rows = rows_from_table(table, mapping) if table else []
+            rows = rows_from_table(table, mapping, header_row) if table else []
         except ParseError:
             if mapping:
                 raise
@@ -257,7 +297,55 @@ def parse_statement(path, mapping=None):
                              headers=[str(c) for c in (table[0] if table else [])],
                              preview=[[str(c) for c in r] for r in table[:15]])
         return rows
-    rows = rows_from_table(table, mapping)
+    rows = rows_from_table(table, mapping, header_row)
     if not rows:
         raise ParseError("The statement has no transactions after the header row.")
     return rows
+
+
+RAW_PREVIEW_ROWS = 80
+RAW_CELL_CHARS = 60
+
+
+def inspect_statement(path, mapping=None, header_row=None):
+    """Everything the column-mapping dialog needs, plus the parsed rows.
+
+    With `mapping` None, the detected header row and mapping are used. Returns (info, rows):
+      info = {mode: 'table'|'text', detected, header_row, mapping, columns, raw, count, problem}
+    mode 'text' means a PDF without tables, read line by line (column mapping does not apply).
+    """
+    table = _clean_table(read_table(path))
+    detected_row, detected_map = find_header(table)
+    user_mapping = mapping is not None  # {} from the dialog means "nothing mapped", not "auto-detect"
+    if not user_mapping:
+        mapping, header_row = detected_map, detected_row
+
+    rows, mode = [], "table"
+    problem = mapping_problem(mapping) if user_mapping or mapping else None
+    if mapping and not problem:
+        start = header_row + 1 if header_row is not None else 0
+        rows = _normalise(table[start:], mapping)
+    if not rows and not user_mapping and path.lower().endswith(".pdf"):
+        rows = _read_pdf_lines(path)
+        if rows:
+            mode, problem = "text", None
+    if not mapping and mode == "table" and not user_mapping:
+        problem = ("Could not detect the statement columns. Pick the header row and map the columns."
+                   if table else "No table found in the file. If it is a scanned PDF, export the "
+                                 "statement as Excel or a text PDF instead.")
+    elif mode == "table" and not problem and not rows:
+        problem = "No transactions found below the header row with this mapping."
+
+    raw = [[str(c)[:RAW_CELL_CHARS] for c in r] for r in table[:RAW_PREVIEW_ROWS]]
+    info = {
+        "mode": mode,
+        "detected": bool(detected_map),
+        "header_row": header_row,
+        "mapping": mapping or {},
+        "columns": max((len(r) for r in raw), default=0),
+        "raw": raw,
+        "total_rows": len(table),
+        "count": len(rows),
+        "problem": problem,
+    }
+    return info, rows
