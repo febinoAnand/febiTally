@@ -276,3 +276,8 @@ kbd {
   font: 600 11px ui-monospace, SFMono-Regular, Menlo, monospace; padding: 1px 5px; border-radius: 4px;
   border: 1px solid var(--border); border-bottom-width: 2px; background: var(--surface-2); color: var(--text);
 }
+.link-btn {
+  display: block; margin-top: 4px; padding: 0; border: 0; background: none; cursor: pointer;
+  font: 600 12px var(--font); color: var(--primary); text-align: left;
+}
+.link-btn:hover { text-decoration: underline; }

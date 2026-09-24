@@ -39,6 +39,8 @@ An import is blocked until the company's ledgers have been fetched.
 
 If the statement has its own ledger column, map it to **Ledger (Tally)** in the mapping dialog. Columns titled *Ledger*, *Ledger Name* or *Account Head* are detected automatically. Each value is matched to a fetched Tally ledger, ignoring upper/lower case. The dialog marks each name ✓ (found) or ✗ (not in Tally). An entry whose name is not found gets a suggested ledger instead and a note saying which name was not found.
 
+In the review table, a row whose ledger is not in Tally shows a **+ Create "…" in Tally** button. That covers a typed name or an unmatched name from the statement's Ledger column. Pressing **Enter** in the Ledger box does the same. The dialog asks for the name, group and opening balance, creates the ledger in Tally, and assigns it to the row. It can also assign it to other rows that want the same name.
+
 For entries with no ledger from the statement, ledgers are suggested automatically in two ways:
 - when a ledger name appears in the narration,
 - from keywords learned from earlier validated entries.

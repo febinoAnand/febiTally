@@ -383,6 +383,101 @@
         || (e.ref_no || "").toLowerCase().includes(q)));
   }
 
+  /* ------------------------------------------------------------ create a missing ledger */
+
+  const STATEMENT_LEDGER_RE = /^Ledger '(.+)' from the statement is not a ledger in Tally/;
+  const ledgerKey = (name) => String(name || "").trim().toLowerCase();
+  const canonicalLedger = (name) => current.ledgers.find((n) => ledgerKey(n) === ledgerKey(name));
+
+  /* The name a row wants but Tally lacks: typed into the box, or from a mapped statement column. */
+  function missingLedger(e) {
+    if (locked(e)) return "";
+    if (e.ledger && !canonicalLedger(e.ledger)) return e.ledger.trim();
+    const m = STATEMENT_LEDGER_RE.exec(e.error || "");
+    return m && !canonicalLedger(m[1]) ? m[1] : "";
+  }
+
+  function createButton(e) {
+    const name = missingLedger(e);
+    return name
+      ? `<button type="button" class="link-btn" data-create="${e.id}" title="Create this ledger in Tally and use it here">+ Create “${esc(name)}” in Tally</button>`
+      : "";
+  }
+
+  let groupCache = { company: null, groups: [] };
+  async function loadGroupsFor(company) {
+    if (groupCache.company === company && groupCache.groups.length) return groupCache.groups;
+    let groups = [];
+    try {
+      groups = (await api("GET", `/api/ledgers/groups?company=${encodeURIComponent(company)}`)).groups;
+    } catch (_) { /* Tally unreachable: fall back to groups seen in fetched ledgers */ }
+    const lr = await api("GET", `/api/ledgers?company=${encodeURIComponent(company)}`);
+    groups = [...new Set(groups.concat(lr.ledgers.map((l) => l.parent).filter(Boolean)))].sort();
+    groupCache = { company, groups };
+    return groups;
+  }
+
+  let createFor = null; // {entryId, name}
+
+  function rowsWanting(name) {
+    const key = ledgerKey(name);
+    return current.entries.filter((e) => !locked(e) && ledgerKey(missingLedger(e)) === key);
+  }
+
+  async function openCreateLedger(entryId, name) {
+    name = (name || "").trim();
+    if (!name) return;
+    createFor = { entryId: Number(entryId), name };
+    const entry = entryById(entryId);
+    $("cl-name").value = name;
+    $("cl-opening").value = 0;
+    let lastGroup = "";
+    try { lastGroup = localStorage.getItem("febitally.newLedgerGroup") || ""; } catch (_) { /* storage blocked */ }
+    $("cl-parent").value = lastGroup;
+    $("cl-context").textContent = entry
+      ? `For ${fmtDate(entry.txn_date)} · ${entry.narration} · ${money(entry.debit || entry.credit)} (${entry.voucher_type})`
+      : "";
+    const others = rowsWanting(name).filter((e) => e.id !== createFor.entryId);
+    $("cl-apply-all-wrap").classList.toggle("hidden", !others.length);
+    $("cl-apply-all").checked = true;
+    $("cl-apply-all-label").textContent = `Also use it for ${others.length} other row${others.length === 1 ? "" : "s"} wanting “${name}”`;
+    openModal("create-ledger-modal");
+    $(lastGroup ? "cl-name" : "cl-parent").focus();
+    const groups = await loadGroupsFor(current.import.company);
+    $("cl-group-list").innerHTML = groups.map((g) => `<option value="${esc(g)}">`).join("");
+  }
+
+  $("create-ledger-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    withButton($("cl-save"), async () => {
+      const name = $("cl-name").value.trim();
+      const parent = $("cl-parent").value.trim();
+      const existing = canonicalLedger(name);
+      if (!existing) {
+        const r = await api("POST", "/api/ledgers", {
+          company: current.import.company, name, parent, opening_balance: $("cl-opening").value,
+        });
+        current.ledgers.push(r.ledger.name);
+        current.ledgers.sort((a, b) => a.localeCompare(b));
+        $("ledger-list").innerHTML = current.ledgers.map((n) => `<option value="${esc(n)}">`).join("");
+        if (companySel.value === current.import.company) companyLedgers.push(r.ledger);
+        try { localStorage.setItem("febitally.newLedgerGroup", parent); } catch (_) { /* storage blocked */ }
+        toast(r.message, "success");
+      }
+      const finalName = existing || name;
+      const targets = $("cl-apply-all").checked && !$("cl-apply-all-wrap").classList.contains("hidden")
+        ? rowsWanting(createFor.name) : [];
+      const ids = new Set([createFor.entryId, ...targets.map((t) => t.id)]);
+      await Promise.all([...ids].map((id) => patchEntry(id, { ledger: finalName })));
+      closeModal("create-ledger-modal");
+      const back = createFor.entryId;
+      createFor = null;
+      renderReview();
+      const box = document.querySelector(`#entries [data-ledger="${back}"]`);
+      if (box) box.focus();
+    });
+  });
+
   function renderReview() {
     const imp = current.import;
     $("review-title").innerHTML = `#${imp.id} · ${esc(imp.filename)} ${badge(imp.status)}`;
@@ -403,7 +498,7 @@
         <td class="num">${money(e.debit)}</td>
         <td class="num">${money(e.credit)}</td>
         <td><input class="inline-input" list="ledger-list" data-ledger="${e.id}" value="${esc(e.ledger)}"
-              placeholder="Select ledger…" ${locked(e) ? "disabled" : ""}></td>
+              placeholder="Select ledger…" ${locked(e) ? "disabled" : ""}>${createButton(e)}</td>
         <td><select class="inline-input" data-vtype="${e.id}" ${locked(e) ? "disabled" : ""}>
               ${["Payment", "Receipt"].map((t) => `<option ${t === e.voucher_type ? "selected" : ""}>${t}</option>`).join("")}
             </select></td>
@@ -477,8 +572,8 @@
         t.checked ? selected.add(id) : selected.delete(id);
         renderReview();
       } else if (t.dataset.ledger) {
-        const val = t.value.trim();
-        if (val && !current.ledgers.includes(val)) toast(`"${val}" is not a ledger in Tally. Create it on the Ledgers page or pick one from the list.`, "error");
+        // exact Tally spelling if it only differs in case; unknown names get a "Create" button
+        const val = canonicalLedger(t.value) || t.value.trim();
         await patchEntry(t.dataset.ledger, { ledger: val });
         renderReview();
       } else if (t.dataset.vtype) {
@@ -493,6 +588,14 @@
   // Tab / Shift+Tab in a ledger box jumps to the next / previous row's ledger box (skipping the
   // voucher dropdown and row buttons). At the first/last row Tab behaves normally.
   $("entries").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && e.target.dataset.ledger) {
+      // wait a tick: Enter may be choosing a suggestion from the list, which fills the box
+      const box = e.target;
+      setTimeout(() => {
+        if (box.value.trim() && !canonicalLedger(box.value)) openCreateLedger(box.dataset.ledger, box.value);
+      }, 0);
+      return;
+    }
     if (e.key !== "Tab" || !e.target.dataset.ledger) return;
     const boxes = [...document.querySelectorAll("#entries input[data-ledger]:not([disabled])")];
     const next = boxes[boxes.indexOf(e.target) + (e.shiftKey ? -1 : 1)];
@@ -506,7 +609,9 @@
   $("entries").addEventListener("click", async (e) => {
     const d = e.target.dataset;
     try {
-      if (d.response) {
+      if (d.create) {
+        openCreateLedger(d.create, missingLedger(entryById(d.create)));
+      } else if (d.response) {
         const en = entryById(d.response);
         showResponse(`Tally response · ${fmtDate(en.txn_date)} ${en.voucher_type}`, en.tally_response,
           `${responseFormat(en.tally_response)} · ${en.status}${en.error ? " · " + en.error : ""}`);
