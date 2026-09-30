@@ -493,6 +493,31 @@ def parse_statement(path, mapping=None, header_row=None, password=None):
     return rows
 
 
+ACCOUNT_LABEL_RE = re.compile(r"\b(a/?c|acc(oun)?t)\.?\s*(no|num(ber)?|#)\b", re.I)
+
+
+def extract_account_number(table, scan=40):
+    """The account number printed in the statement header ('Account Number | 0125…', 'A/c No: 5010…').
+
+    Returns the digits, or '' when none is found."""
+    for row in table[:scan]:
+        cells = [str(c).strip() for c in row]
+        for i, cell in enumerate(cells):
+            if not ACCOUNT_LABEL_RE.search(cell):
+                continue
+            after_colon = cell.split(":", 1)[1] if ":" in cell else ""
+            for candidate in [after_colon] + cells[i + 1:i + 3]:
+                digits = re.sub(r"\D", "", candidate)
+                if 6 <= len(digits) <= 20 and not re.search(r"[A-Za-z]{3,}", candidate):
+                    return digits
+    return ""
+
+
+def header_text(table, rows=8):
+    """Text of the statement's first rows (bank name, statement title) for matching the bank ledger."""
+    return " ".join(str(c) for r in table[:rows] for c in r if str(c).strip())
+
+
 RAW_PREVIEW_ROWS = 80
 RAW_CELL_CHARS = 60
 
@@ -535,6 +560,8 @@ def inspect_statement(path, mapping=None, header_row=None, password=None):
         "columns": max((len(r) for r in raw), default=0),
         "raw": raw,
         "total_rows": len(table),
+        "account_number": extract_account_number(table),
+        "header_text": header_text(table)[:500],
         "count": len(rows),
         "problem": problem,
     }

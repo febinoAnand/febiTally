@@ -126,6 +126,7 @@ class FakeTally:
                        "parent": el.findtext("PARENT"), "openingbalance": el.findtext("OPENINGBALANCE") or "0"}
             else:
                 msg = {"metadata": {"type": "Voucher"}, "vouchertypename": el.findtext("VOUCHERTYPENAME"),
+                       "narration": el.findtext("NARRATION") or "",
                        "allledgerentries": [{"ledgername": l.findtext("LEDGERNAME"), "amount": l.findtext("AMOUNT"),
                                              "isdeemedpositive": l.findtext("ISDEEMEDPOSITIVE")}
                                             for l in el.findall("ALLLEDGERENTRIES.LIST")]}

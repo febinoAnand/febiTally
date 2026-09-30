@@ -413,3 +413,63 @@ def test_password_protected_upload_flow(app, client, fake_tally, tmp_path):
     conn = sqlite3.connect(app.config["DB_PATH"])
     for table in ("settings", "imports", "entries"):
         assert "secret" not in repr(conn.execute("SELECT * FROM %s" % table).fetchall())
+
+
+def test_bank_suggestion_after_upload(client, fake_tally, tmp_path):
+    fake_tally.ledgers["Dhanlaxmi Bank"] = {"parent": "Bank Accounts", "openingbalance": "0"}
+    client.post("/api/ledgers/fetch", json={"company": COMPANY})
+    path = fixtures.make_disguised_xls(str(tmp_path / "Dhanbank_01_04_2026_to_24_09_2026.xls"), "xlsx")
+
+    def preview(company=COMPANY):
+        with open(path, "rb") as f:
+            data = {"file": (f, "Dhanbank_01_04_2026_to_24_09_2026.xls")}
+            if company:
+                data["company"] = company
+            return client.post("/api/imports/preview", data=data, content_type="multipart/form-data").get_json()
+
+    # 3. bank named in the file name / header ("Dhanbank" ~ "Dhanlaxmi Bank")
+    p = preview()
+    assert p["account_number"] == "012501100000181"
+    assert p["bank_suggestion"] == {"ledger": "Dhanlaxmi Bank",
+                                    "reason": "Ledger name matches the bank named in the statement"}
+    assert preview(company=None)["bank_suggestion"] is None
+
+    # 2. account digits in a ledger name beat the name match
+    fake_tally.ledgers["Savings A/c 0181"] = {"parent": "Bank Accounts", "openingbalance": "0"}
+    client.post("/api/ledgers/fetch", json={"company": COMPANY})
+    assert preview()["bank_suggestion"]["ledger"] == "Savings A/c 0181"
+
+    # 1. the ledger picked for this account last time wins
+    p = preview()
+    r = client.post("/api/imports", data={"company": COMPANY, "bank_ledger": "HDFC Bank", "token": p["token"],
+                                          "mapping": json.dumps(p["mapping"]), "header_row": str(p["header_row"])})
+    assert r.status_code == 201
+    assert preview()["bank_suggestion"] == {"ledger": "HDFC Bank", "reason": "Used for account …0181 last time"}
+
+    # cash ledgers are never suggested as the statement's bank
+    assert preview()["bank_suggestion"]["ledger"] != "Cash"
+
+
+def test_edit_narration(client, fake_tally, tmp_path):
+    client.post("/api/ledgers/fetch", json={"company": COMPANY})
+    import_id = _upload(client, tmp_path).get_json()["import_id"]
+    rent = [e for e in client.get("/api/imports/%d" % import_id).get_json()["entries"]
+            if e["txn_date"] == "2026-04-05"][0]
+    url = "/api/imports/%d/entries/%d" % (import_id, rent["id"])
+    client.post("/api/imports/%d/validate" % import_id, json={"entry_ids": [rent["id"]]})
+
+    # narration-only edit: tidied, and the row stays validated
+    r = client.patch(url, json={"narration": "  Office rent   for April 2026\nCheque 000781 "}).get_json()["entry"]
+    assert r["narration"] == "Office rent for April 2026\nCheque 000781"
+    assert r["status"] == "validated"
+    # any other edit still needs re-validation
+    assert client.patch(url, json={"ref_no": "781"}).get_json()["entry"]["status"] == "pending"
+
+    too_long = client.patch(url, json={"narration": "x" * 1001})
+    assert too_long.status_code == 400 and "too long" in too_long.get_json()["error"]
+
+    # the edited narration is what Tally receives, and pushed rows are locked
+    client.post("/api/imports/%d/validate" % import_id, json={"entry_ids": [rent["id"]]})
+    client.post("/api/imports/%d/push" % import_id, json={"entry_ids": [rent["id"]]})
+    assert fake_tally.vouchers[-1]["narration"] == "Office rent for April 2026\nCheque 000781"
+    assert client.patch(url, json={"narration": "changed"}).status_code == 400

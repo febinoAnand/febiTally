@@ -21,6 +21,7 @@ bp = Blueprint("api_imports", __name__, url_prefix="/api/imports")
 VOUCHER_TYPES = ("Payment", "Receipt", "Contra")
 MAPPABLE_FIELDS = ["txn_date", "narration", "ref_no", "debit", "credit", "balance", "amount", "drcr", "ledger"]
 PREVIEW_SAMPLE_ROWS = 15
+MAX_NARRATION = 1000  # characters; sent to Tally as the voucher narration
 EDITABLE = ("txn_date", "narration", "ref_no", "debit", "credit", "ledger", "voucher_type")
 
 
@@ -226,11 +227,61 @@ def _inspect(path, mapping, header_row, password, token, filename):
         raise ApiError("Could not read the file: %s" % exc, 422)
 
 
+# Words in bank / ledger names that say nothing about which bank it is.
+BANK_STOPWORDS = {"bank", "banks", "ltd", "limited", "the", "of", "and", "account", "accounts", "statement",
+                  "current", "savings", "saving", "casa", "od", "occ", "cc", "branch", "customer", "name", "pvt",
+                  "india", "indian", "number", "from", "to", "xls", "xlsx", "csv", "pdf", "salary"}
+
+
+def _bank_account_key(company, account):
+    return "bank_account:%s:%s" % (company, account)
+
+
+def _bank_words(text):
+    return {w for w in re.split(r"[^a-z]+", (text or "").lower()) if len(w) >= 3 and w not in BANK_STOPWORDS}
+
+
+def _suggest_bank(company, account, filename, header):
+    """Most likely bank ledger for an uploaded statement: {ledger, reason}, or None.
+
+    1. the ledger chosen last time for this account number,
+    2. a bank ledger whose name contains the account's last 4+ digits ("HDFC Bank - 5678"),
+    3. a bank ledger whose name shares a word (4+ letters in common) with the file name or
+       statement header ("Dhanbank_….xls" -> "Dhanlaxmi Bank").
+    """
+    banks = [r for r in db.query(
+        "SELECT name, parent, cash_bank FROM ledgers WHERE company = ? ORDER BY name COLLATE NOCASE", (company,))
+        if (r["cash_bank"] or (r["parent"] or "").lower() in CASH_BANK_GROUPS)
+        and (r["parent"] or "").lower() != "cash-in-hand"]
+    names = {b["name"] for b in banks}
+    tail = account[-4:] if account else ""
+    if account:
+        saved = db.get_setting(_bank_account_key(company, account))
+        if saved in names:
+            return {"ledger": saved, "reason": "Used for account …%s last time" % tail}
+        for b in banks:
+            digits = re.sub(r"\D", "", b["name"])
+            if len(digits) >= 4 and (account.endswith(digits) or digits.endswith(tail)):
+                return {"ledger": b["name"], "reason": "Ledger name matches account …%s" % tail}
+    hints = _bank_words(re.sub(r"[_\-.]", " ", os.path.splitext(filename or "")[0])) | _bank_words(header)
+    best, best_len = None, 0
+    for b in banks:
+        for word in _bank_words(b["name"]):
+            for hint in hints:
+                common = len(os.path.commonprefix([word, hint]))
+                if common >= 4 and common > best_len:
+                    best, best_len = b["name"], common
+    if best:
+        return {"ledger": best, "reason": "Ledger name matches the bank named in the statement"}
+    return None
+
+
 @bp.post("/preview")
 def preview_import():
     """Upload (or re-inspect) a statement for the column-mapping dialog. Nothing is imported.
 
-    multipart: file  — or form/JSON: token; optional mapping (JSON {field: column}), header_row,
+    multipart: file  — or form/JSON: token; optional company (to suggest the bank ledger),
+    mapping (JSON {field: column}), header_row,
     password (for an encrypted PDF/Excel file). A protected file without the right password gets
     422 {need_password, wrong_password, token}: ask for the password and send it with the token.
     """
@@ -245,8 +296,10 @@ def preview_import():
     mapping, header_row = _mapping_arg(data.get("mapping"), data.get("header_row"))
     password = data.get("password") or None  # only used to open the file; never stored or logged
     info, rows = _inspect(path, mapping, header_row, password, token, filename)
+    company = (data.get("company") or "").strip()
+    suggestion = _suggest_bank(company, info["account_number"], filename, info["header_text"]) if company else None
     return jsonify(dict(info, token=token, filename=filename, fields=MAPPABLE_FIELDS,
-                        protected=bool(password), sample=rows[:PREVIEW_SAMPLE_ROWS]))
+                        protected=bool(password), bank_suggestion=suggestion, sample=rows[:PREVIEW_SAMPLE_ROWS]))
 
 
 @bp.post("")
@@ -322,6 +375,9 @@ def create_import():
                 (import_id, row["txn_date"], row["narration"], row["ref_no"], row["debit"], row["credit"],
                  row["balance"], ledger, default_voucher_type(ledger, row["debit"], cash_bank),
                  "skipped" if dup else "pending", note))
+    if request.form.get("token") and info.get("account_number"):
+        # remember which bank ledger this account belongs to, for the next statement
+        db.set_setting(_bank_account_key(company, info["account_number"]), bank_ledger)
     message = "Imported %d entries." % len(rows)
     if unmatched:
         message += " %d ledger name(s) from the statement were not found in Tally." % unmatched
@@ -368,11 +424,16 @@ def update_entry(import_id, entry_id):
         changes["voucher_type"] = default_voucher_type(changes["ledger"], debit, _cash_bank_names(imp["company"]))
     if "txn_date" in changes:
         changes["txn_date"] = parse_date(changes["txn_date"]) or changes["txn_date"]
+    if "narration" in changes:
+        narration = re.sub(r"[ \t]+", " ", str(changes["narration"] or "")).strip()
+        if len(narration) > MAX_NARRATION:
+            raise ApiError("Narration is too long (%d characters, at most %d)." % (len(narration), MAX_NARRATION))
+        changes["narration"] = narration
     status = data.get("status")
     if status == "skipped":
         changes.update(status="skipped", error=None)
-    elif status == "pending" or changes:
-        # any edit invalidates a previous validation
+    elif status == "pending" or (changes and set(changes) != {"narration"}):
+        # an edit invalidates a previous validation; the narration alone does not affect it
         changes.update(status="pending", error=None)
     if changes:
         cols = ", ".join("%s = ?" % k for k in changes)

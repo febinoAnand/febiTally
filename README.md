@@ -31,11 +31,19 @@ Test connection uses the format currently selected on the form.
 | Page | What it does |
 |---|---|
 | Dashboard | Tally connection status, entry counts by status, recent imports, ledgers cached per company |
-| Import Statement | 1. Pick the company (it must be open in Tally) and the bank ledger. 2. Upload the file. The **Map statement columns** dialog opens with the header row and columns already detected, a preview of the file, and a live preview of the parsed entries; adjust anything, then import. 3. Review the entries: pick a ledger per row, validate, then push to Tally. You can edit, skip or delete rows. Failed pushes show Tally's error and can be retried. |
+| Import Statement | 1. Pick the company (it must be open in Tally). 2. Upload the file. A popup asks which **bank ledger** the statement belongs to (see below). Then the **Map statement columns** dialog opens with the header row and columns already detected, a preview of the file, and a live preview of the parsed entries; adjust anything, then import. 3. Review the entries: pick a ledger per row, validate, then push to Tally. You can edit, skip or delete rows. Failed pushes show Tally's error and can be retried. |
 | Ledgers | Fetch all ledgers of a company from Tally. Create, edit and delete ledgers; every change is written to Tally first. |
 | Settings | Tally host, port and response format (JSON/XML), a connection test, and an API console for sending raw JSON or XML requests to Tally |
 
 An import is blocked until the company's ledgers have been fetched.
+
+**Choosing the bank.** After upload, the bank popup pre-selects the most likely bank ledger, in this order:
+1. the ledger used last time for the account number printed in the statement header;
+2. a bank ledger whose name contains the account's last digits (e.g. "HDFC Bank - 5678");
+3. a bank ledger whose name matches the bank in the file name or header (e.g. `Dhanbank_….xls` → "Dhanlaxmi Bank");
+4. otherwise, the last bank used for the company.
+
+The mapping dialog shows the chosen bank with a **Change** link.
 
 **Password-protected statements.**
 - For an encrypted PDF or Excel file, a **Password-protected statement** popup asks for the password. A wrong password keeps the popup open with "Incorrect password".
@@ -44,6 +52,15 @@ An import is blocked until the company's ledgers have been fetched.
 - Excel decryption uses `msoffcrypto-tool`. After updating, run `pip install -r requirements.txt` again.
 
 If the statement has its own ledger column, map it to **Ledger (Tally)** in the mapping dialog. Columns titled *Ledger*, *Ledger Name* or *Account Head* are detected automatically. Each value is matched to a fetched Tally ledger, ignoring upper/lower case. The dialog marks each name ✓ (found) or ✗ (not in Tally). An entry whose name is not found gets a suggested ledger instead and a note saying which name was not found.
+
+**Filtering the review table.**
+- The status tabs show counts.
+- Search matches narration, ledger or reference.
+- **Filters** narrows by date range, withdrawals/deposits, voucher type, ledger (not set / not in Tally / a specific ledger) and amount range.
+- Active filters appear as removable chips, with "Showing N of M" and totals for the filtered rows.
+- Select-all, **Set ledger for selected…** and **Validate** act only on the rows shown.
+
+In the review table, click a **narration** to edit it in place; it becomes the voucher narration in Tally. **Enter** or clicking away saves, **Esc** cancels and **Shift+Enter** adds a line. Editing only the narration keeps a validated row validated. Pushed rows are read-only.
 
 In the review table, a row whose ledger is not in Tally shows a **+ Create "…" in Tally** button. That covers a typed name or an unmatched name from the statement's Ledger column. Pressing **Enter** in the Ledger box does the same. The dialog asks for the name, group and opening balance, creates the ledger in Tally, and assigns it to the row. It can also assign it to other rows that want the same name.
 

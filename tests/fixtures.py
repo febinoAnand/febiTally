@@ -112,7 +112,8 @@ def make_disguised_xls(path, kind):
     header = ["Txn Date", "Description", "Ref No", "Txn Amount", "Balance"]
     rows = [["07/04/2026", "SMS CHARGES", "0", "\u20b9\u00a02.12 Dr", "\u20b9\u00a01,191.12"],
             ["01/07/2026", "INTEREST ON SB A/C", " ", "\u20b9\u00a07.00 Cr", "\u20b9\u00a01,198.12"]]
-    letterhead = [["CASA Statement"], ["Customer Name", "A KUMAR"], []]
+    letterhead = [["", "", "CASA Statement"], ["Customer Name", "A KUMAR"],
+                  ["Account Number", "012501100000181", "Available Balance", "\u20b9\u00a0842.70"], []]
     summary = [[], ["Opening Balance", "Debit Count", "Total Debits", "Credit Count", "Total Credits"],
                ["\u20b9\u00a01,193.24", "1", "\u20b9\u00a02.12", "1", "\u20b9\u00a07.00"]]
     all_rows = letterhead + [header] + rows + summary

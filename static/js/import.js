@@ -1,6 +1,5 @@
 (async function () {
   const $ = (id) => document.getElementById(id);
-  const BANK_GROUPS = ["bank accounts", "bank od a/c", "bank occ a/c"];
   const FIELDS = [
     ["txn_date", "Date", true], ["narration", "Narration / Description", true], ["ref_no", "Ref / Chq no."],
     ["debit", "Withdrawal (Dr)"], ["credit", "Deposit (Cr)"], ["balance", "Balance"],
@@ -9,7 +8,6 @@
   const FIELD_LABEL = Object.fromEntries(FIELDS.map(([k, l]) => [k, l]));
 
   const companySel = $("company");
-  const bankSel = $("bank-ledger");
   let companyLedgers = [];
   let file = null;
   let current = null; // {import, entries}
@@ -28,8 +26,6 @@
     const company = companySel.value;
     companyLedgers = [];
     $("ledger-status").innerHTML = "";
-    bankSel.disabled = true;
-    bankSel.innerHTML = `<option value="">Select company first</option>`;
     if (!company) return updateSteps();
     const r = await api("GET", `/api/ledgers?company=${encodeURIComponent(company)}`);
     companyLedgers = r.ledgers;
@@ -56,31 +52,14 @@
           await onCompanyChange();
         });
       });
-      fillBankLedgers();
     }
     updateSteps();
   }
 
-  function fillBankLedgers() {
-    const showAll = $("show-all-ledgers").checked;
-    let list = companyLedgers.filter((l) => BANK_GROUPS.includes((l.parent || "").toLowerCase()));
-    if (showAll || !list.length) list = companyLedgers;
-    let saved = null;
-    try { saved = localStorage.getItem(`febitally.bank.${companySel.value}`); } catch (_) { /* storage blocked */ }
-    bankSel.innerHTML = `<option value="">Select bank ledger…</option>` +
-      list.map((l) => `<option value="${esc(l.name)}" ${l.name === saved ? "selected" : ""}>${esc(l.name)}${l.parent ? " — " + esc(l.parent) : ""}</option>`).join("");
-    bankSel.disabled = false;
-  }
-
   companySel.addEventListener("change", () => onCompanyChange().catch((e) => toast(e.message, "error")));
-  $("show-all-ledgers").addEventListener("change", fillBankLedgers);
-  bankSel.addEventListener("change", () => {
-    try { localStorage.setItem(`febitally.bank.${companySel.value}`, bankSel.value); } catch (_) { /* storage blocked */ }
-    updateSteps();
-  });
 
   function updateSteps() {
-    const s1 = companySel.value && companyLedgers.length && bankSel.value;
+    const s1 = companySel.value && companyLedgers.length;
     $("step-1").className = `step ${s1 ? "done" : "active"}`;
     $("step-2").className = `step ${s1 ? "active" : ""}`;
     $("step-3").className = "step";
@@ -115,14 +94,79 @@
   $("upload-btn").addEventListener("click", () => withButton($("upload-btn"), async () => {
     const fd = new FormData();
     fd.append("file", file);
+    fd.append("company", companySel.value);
     try {
       preview = await api("POST", "/api/imports/preview", fd);
     } catch (e) {
       if (e.data.need_password) return askPassword(e.data);
       throw e;
     }
-    openMappingDialog();
+    askBank();
   }));
+
+  /* ------------------------------------------------------------ which bank ledger (popup) */
+
+  const BANK_ONLY = ["bank accounts", "bank od a/c", "bank occ a/c"];
+  let bankFromMapping = false; // opened from the mapping dialog's "Change" link
+
+  function bankLedgers(showAll) {
+    if (showAll) return companyLedgers;
+    return companyLedgers.filter((l) => {
+      const group = (l.parent || "").toLowerCase();
+      return group !== "cash-in-hand" && (l.cash_bank || BANK_ONLY.includes(group));
+    });
+  }
+
+  function fillBankChoice() {
+    const list = bankLedgers($("bank-show-all").checked);
+    const want = $("bank-choice").value || preview.bank_ledger || (preview.bank_suggestion || {}).ledger || lastBank();
+    $("bank-choice").innerHTML = `<option value="">Select bank ledger…</option>` + list.map((l) =>
+      `<option value="${esc(l.name)}">${esc(l.name)}${l.parent ? " — " + esc(l.parent) : ""}</option>`).join("");
+    const pick = list.some((l) => l.name === want) ? want : (list.length === 1 ? list[0].name : "");
+    $("bank-choice").value = pick;
+    $("bank-empty").classList.toggle("hidden", list.length > 0);
+    showBankReason();
+  }
+
+  function showBankReason() {
+    const s = preview.bank_suggestion;
+    const v = $("bank-choice").value;
+    let reason = "";
+    if (v && s && s.ledger === v) reason = `✓ ${s.reason}.`;
+    else if (v && v === lastBank()) reason = "Last bank used for this company.";
+    $("bank-reason").textContent = reason;
+  }
+
+  function lastBank() {
+    try { return localStorage.getItem(`febitally.bank.${companySel.value}`) || ""; } catch (_) { return ""; }
+  }
+
+  function askBank(fromMapping = false) {
+    bankFromMapping = fromMapping;
+    $("bank-file").textContent = preview.filename;
+    const facts = [];
+    if (preview.account_number) facts.push(`Account no. <b>…${esc(preview.account_number.slice(-4))}</b> found in the statement`);
+    facts.push(`${preview.count} transaction${preview.count === 1 ? "" : "s"} detected`);
+    $("bank-facts").innerHTML = facts.map((f) => `<span>${f}</span>`).join("");
+    $("bank-show-all").checked = false;
+    $("bank-choice").value = "";
+    fillBankChoice();
+    openModal("bank-modal");
+    $("bank-choice").focus();
+  }
+
+  $("bank-show-all").addEventListener("change", fillBankChoice);
+  $("bank-choice").addEventListener("change", showBankReason);
+  $("bank-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const bank = $("bank-choice").value;
+    if (!bank) return toast("Select the bank ledger for this statement.", "error");
+    preview.bank_ledger = bank;
+    try { localStorage.setItem(`febitally.bank.${companySel.value}`, bank); } catch (_) { /* storage blocked */ }
+    closeModal("bank-modal");
+    if (bankFromMapping) $("map-bank").textContent = bank;
+    else openMappingDialog();
+  });
 
   /* ------------------------------------------------------------ password-protected statements */
 
@@ -160,7 +204,7 @@
     if (!password) return showPasswordError("Enter the password.");
     withButton($("pw-unlock"), async () => {
       try {
-        const r = await api("POST", "/api/imports/preview", { token: pendingUnlock.token, password });
+        const r = await api("POST", "/api/imports/preview", { token: pendingUnlock.token, password, company: companySel.value });
         preview = Object.assign(r, { password });
       } catch (err) {
         if (err.data.need_password) {
@@ -173,7 +217,7 @@
       pendingUnlock = null;
       $("pw-input").value = "";
       closeModal("password-modal");
-      openMappingDialog();
+      askBank();
     });
   });
 
@@ -189,7 +233,8 @@
 
   function openMappingDialog() {
     const p = preview;
-    $("map-sub").textContent = `${p.filename}${p.password ? " · password-protected (unlocked)" : ""} · ${p.total_rows} rows in file · ${companySel.value} · ${bankSel.value}`;
+    $("map-sub").textContent = `${p.filename}${p.password ? " · password-protected (unlocked)" : ""} · ${p.total_rows} rows in file · ${companySel.value}`;
+    $("map-bank").textContent = p.bank_ledger;
     const tableMode = p.mode === "table";
     $("map-controls").classList.toggle("hidden", !tableMode);
     $("map-raw-wrap").classList.toggle("hidden", !tableMode);
@@ -335,6 +380,11 @@
     renderRaw();
     refreshPreview();
   });
+  $("map-change-bank").addEventListener("click", (e) => {
+    e.preventDefault();
+    askBank(true);
+  });
+
   $("map-raw").addEventListener("click", (e) => {
     const tr = e.target.closest("tr[data-row]");
     if (!tr) return;
@@ -345,7 +395,7 @@
   $("mapping-apply").addEventListener("click", () => withButton($("mapping-apply"), async () => {
     const fd = new FormData();
     fd.append("company", companySel.value);
-    fd.append("bank_ledger", bankSel.value);
+    fd.append("bank_ledger", preview.bank_ledger);
     fd.append("token", preview.token);
     if (preview.password) fd.append("password", preview.password);
     if (preview.mode === "table") {
@@ -422,6 +472,11 @@
     current = imp;
     current.ledgers = lr.ledgers.map((l) => l.name);
     current.ledgerInfo = new Map(lr.ledgers.map((l) => [l.name, l]));
+    ["entry-search", "f-from", "f-to", "f-dir", "f-vtype", "f-ledger-mode", "f-ledger", "f-min", "f-max"]
+      .forEach((fid) => { $(fid).value = ""; });
+    $("f-ledger").classList.add("hidden");
+    filter = "all";
+    document.querySelectorAll("#filters button").forEach((b) => b.classList.toggle("active", b.dataset.filter === "all"));
     selected.clear();
     renderLedgerList();
     $("setup").classList.add("hidden");
@@ -452,12 +507,99 @@
 
   const locked = (e) => e.status === "pushed" || e.status === "skipped";
 
-  function visibleEntries() {
-    const q = $("entry-search").value.trim().toLowerCase();
-    return current.entries.filter((e) => (filter === "all" || e.status === filter)
-      && (!q || (e.narration || "").toLowerCase().includes(q) || (e.ledger || "").toLowerCase().includes(q)
-        || (e.ref_no || "").toLowerCase().includes(q)));
+  /* ------------------------------------------------------------ filters */
+
+  // Status tab + search + the Filters panel. Everything is filtered in the browser.
+  function filterValues() {
+    const num = (id) => ($(id).value === "" ? null : Number($(id).value));
+    return {
+      q: $("entry-search").value.trim().toLowerCase(),
+      from: $("f-from").value, to: $("f-to").value,
+      dir: $("f-dir").value, vtype: $("f-vtype").value,
+      ledgerMode: $("f-ledger-mode").value, ledger: $("f-ledger").value.trim(),
+      min: num("f-min"), max: num("f-max"),
+    };
   }
+
+  function matches(e, f, ignoreStatus = false) {
+    if (!ignoreStatus && filter !== "all" && e.status !== filter) return false;
+    if (f.q && ![e.narration, e.ledger, e.ref_no].some((v) => (v || "").toLowerCase().includes(f.q))) return false;
+    if (f.from && e.txn_date < f.from) return false;
+    if (f.to && e.txn_date > f.to) return false;
+    const out = Number(e.debit || 0) > 0;
+    if (f.dir === "out" && !out) return false;
+    if (f.dir === "in" && out) return false;
+    if (f.vtype && e.voucher_type !== f.vtype) return false;
+    if (f.ledgerMode === "unset" && e.ledger) return false;
+    if (f.ledgerMode === "missing" && !(e.ledger ? !canonicalLedger(e.ledger) : STATEMENT_LEDGER_RE.test(e.error || ""))) return false;
+    if (f.ledgerMode === "is" && f.ledger && ledgerKey(e.ledger) !== ledgerKey(f.ledger)) return false;
+    const amount = Number(e.debit || 0) || Number(e.credit || 0);
+    if (f.min !== null && amount < f.min) return false;
+    if (f.max !== null && amount > f.max) return false;
+    return true;
+  }
+
+  function visibleEntries() {
+    const f = filterValues();
+    return current.entries.filter((e) => matches(e, f));
+  }
+
+  /* Chips for the active filters (each removable), and the count shown on the Filters button. */
+  function activeFilters() {
+    const f = filterValues();
+    const list = [];
+    const add = (label, clear) => list.push({ label, clear });
+    if (f.q) add(`Search: “${$("entry-search").value.trim()}”`, () => { $("entry-search").value = ""; });
+    if (f.from || f.to) {
+      add(f.from && f.to ? `${fmtDate(f.from)} – ${fmtDate(f.to)}` : f.from ? `From ${fmtDate(f.from)}` : `Until ${fmtDate(f.to)}`,
+        () => { $("f-from").value = ""; $("f-to").value = ""; });
+    }
+    if (f.dir) add(f.dir === "out" ? "Withdrawals" : "Deposits", () => { $("f-dir").value = ""; });
+    if (f.vtype) add(`Voucher: ${f.vtype}`, () => { $("f-vtype").value = ""; });
+    if (f.ledgerMode === "unset") add("Ledger not set", () => { $("f-ledger-mode").value = ""; });
+    if (f.ledgerMode === "missing") add("Ledger not in Tally", () => { $("f-ledger-mode").value = ""; });
+    if (f.ledgerMode === "is" && f.ledger) add(`Ledger: ${f.ledger}`, () => { $("f-ledger-mode").value = ""; $("f-ledger").value = ""; });
+    if (f.min !== null || f.max !== null) {
+      add(f.min !== null && f.max !== null ? `Amount ${money(f.min) || "0.00"} – ${money(f.max) || "0.00"}`
+        : f.min !== null ? `Amount ≥ ${money(f.min) || "0.00"}` : `Amount ≤ ${money(f.max) || "0.00"}`,
+      () => { $("f-min").value = ""; $("f-max").value = ""; });
+    }
+    return list;
+  }
+
+  function onFiltersChanged() {
+    $("f-ledger").classList.toggle("hidden", $("f-ledger-mode").value !== "is");
+    // bulk actions only ever apply to rows you can see
+    const visible = new Set(visibleEntries().map((e) => e.id));
+    [...selected].forEach((id) => { if (!visible.has(id)) selected.delete(id); });
+    renderReview();
+  }
+
+  function clearFilters() {
+    ["entry-search", "f-from", "f-to", "f-dir", "f-vtype", "f-ledger-mode", "f-ledger", "f-min", "f-max"]
+      .forEach((id) => { $(id).value = ""; });
+    filter = "all";
+    document.querySelectorAll("#filters button").forEach((b) => b.classList.toggle("active", b.dataset.filter === "all"));
+    onFiltersChanged();
+  }
+
+  $("filter-toggle").addEventListener("click", () => {
+    const open = $("filter-panel").classList.toggle("hidden") === false;
+    $("filter-toggle").setAttribute("aria-expanded", String(open));
+    if (open) $("f-from").focus();
+  });
+  ["f-from", "f-to", "f-dir", "f-vtype", "f-ledger-mode", "f-ledger", "f-min", "f-max"].forEach((id) => {
+    $(id).addEventListener("input", onFiltersChanged);
+    $(id).addEventListener("change", onFiltersChanged);
+  });
+  $("f-ledger-mode").addEventListener("change", () => { if ($("f-ledger-mode").value === "is") $("f-ledger").focus(); });
+  $("filter-clear").addEventListener("click", clearFilters);
+  $("filter-chips").addEventListener("click", (e) => {
+    const i = e.target.dataset.removeFilter;
+    if (i === undefined) return;
+    const f = activeFilters()[Number(i)];
+    if (f) { f.clear(); onFiltersChanged(); }
+  });
 
   /* ------------------------------------------------------------ create a missing ledger */
 
@@ -566,6 +708,108 @@
     });
   });
 
+  /* ------------------------------------------------------------ inline narration editing */
+
+  // The narration is sent to Tally as the voucher narration. Pushed rows are read-only (the voucher
+  // already exists in Tally); every other row can be edited in place.
+  function narrationCell(e) {
+    if (e.status === "pushed") return `<span class="narr-static">${esc(e.narration)}</span>`;
+    const text = e.narration ? esc(e.narration) : `<span class="muted">Add narration…</span>`;
+    return `<div class="narr-text" data-narr="${e.id}" tabindex="0" role="button"
+              title="Click to edit the narration sent to Tally">${text}<span class="narr-pencil" aria-hidden="true">✎</span></div>`;
+  }
+
+  function startNarrationEdit(id, value) {
+    const cell = document.querySelector(`#entries [data-narr="${id}"]`);
+    const entry = entryById(id);
+    if (!cell || !entry) return null;
+    const wrap = document.createElement("div");
+    wrap.className = "narr-editor";
+    wrap.innerHTML = `
+      <textarea class="inline-input" data-narr-edit="${id}" rows="2" maxlength="1000"
+                aria-label="Narration"></textarea>
+      <div class="narr-actions">
+        <button type="button" class="btn btn-sm btn-primary" data-narr-save="${id}">Save</button>
+        <button type="button" class="btn btn-sm" data-narr-cancel="${id}">Cancel</button>
+        <span class="muted small">Enter to save · Esc to cancel · Shift+Enter new line</span>
+      </div>`;
+    cell.replaceWith(wrap);
+    const box = wrap.querySelector("textarea");
+    box.value = value !== undefined ? value : entry.narration || "";
+    autoSize(box);
+    box.focus();
+    if (value === undefined) box.select();
+    return box;
+  }
+
+  function autoSize(box) {
+    box.style.height = "auto";
+    box.style.height = Math.min(box.scrollHeight + 2, 160) + "px";
+  }
+
+  let savingNarration = false;
+  async function saveNarration(box) {
+    if (savingNarration) return;
+    const id = Number(box.dataset.narrEdit);
+    const entry = entryById(id);
+    const value = box.value.replace(/[ \t]+/g, " ").trim();
+    if (!entry || value === (entry.narration || "")) return cancelNarration(box); // unchanged: just close
+    savingNarration = true;
+    box.disabled = true;
+    try {
+      await patchEntry(id, { narration: value });
+      box.blur();
+      renderReview();
+      const row = document.querySelector(`#entries tr[data-id="${id}"]`);
+      if (row) {
+        row.classList.add("saved-flash");
+        setTimeout(() => row.classList.remove("saved-flash"), 1000);
+      }
+    } catch (err) {
+      box.disabled = false;
+      box.focus();
+      toast(err.message, "error");
+    } finally {
+      savingNarration = false;
+    }
+  }
+
+  function cancelNarration(box) {
+    box.dataset.cancelled = "1";
+    box.blur();
+    renderReview();
+  }
+
+  $("entries").addEventListener("click", (e) => {
+    const t = e.target.closest("[data-narr], [data-narr-save], [data-narr-cancel]");
+    if (!t) return;
+    if (t.dataset.narr) startNarrationEdit(t.dataset.narr);
+    const box = t.closest(".narr-editor") && t.closest(".narr-editor").querySelector("textarea");
+    if (t.dataset.narrSave && box) saveNarration(box);
+    if (t.dataset.narrCancel && box) cancelNarration(box);
+  });
+  // keep the textarea focused while pressing Save / Cancel (so blur doesn't save first)
+  $("entries").addEventListener("mousedown", (e) => {
+    if (e.target.closest("[data-narr-save], [data-narr-cancel]")) e.preventDefault();
+  });
+  $("entries").addEventListener("keydown", (e) => {
+    const t = e.target;
+    if (t.dataset && t.dataset.narr && (e.key === "Enter" || e.key === "F2")) {
+      e.preventDefault();
+      startNarrationEdit(t.dataset.narr);
+    } else if (t.dataset && t.dataset.narrEdit) {
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); saveNarration(t); }
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); cancelNarration(t); }
+    }
+  });
+  $("entries").addEventListener("input", (e) => { if (e.target.dataset.narrEdit) autoSize(e.target); });
+  // clicking elsewhere saves, like a spreadsheet cell
+  $("entries").addEventListener("focusout", (e) => {
+    const box = e.target;
+    if (!box.dataset || !box.dataset.narrEdit || box.dataset.cancelled || box.disabled) return;
+    setTimeout(() => { if (document.contains(box) && document.activeElement !== box) saveNarration(box); }, 0);
+  });
+
   function renderReview() {
     const imp = current.import;
     $("review-title").innerHTML = `#${imp.id} · ${esc(imp.filename)} ${badge(imp.status)}`;
@@ -577,11 +821,15 @@
     const keep = active && active.dataset && active.dataset.ledger
       ? { id: active.dataset.ledger, value: active.value, start: active.selectionStart, end: active.selectionEnd }
       : null;
+    // ...and a narration being edited, so a redraw (e.g. another row saved) doesn't lose the typing
+    const keepNarr = active && active.dataset && active.dataset.narrEdit
+      ? { id: active.dataset.narrEdit, value: active.value, start: active.selectionStart, end: active.selectionEnd }
+      : null;
     $("entries").innerHTML = rows.length ? rows.map((e) => `
       <tr class="row-${e.status}" data-id="${e.id}">
         <td><input type="checkbox" data-check="${e.id}" ${selected.has(e.id) ? "checked" : ""} ${locked(e) ? "disabled" : ""}></td>
         <td style="white-space:nowrap">${fmtDate(e.txn_date)}</td>
-        <td class="narration">${esc(e.narration)}${e.error ? `<div class="row-error">${esc(e.error)}</div>` : ""}</td>
+        <td class="narration">${narrationCell(e)}${e.error ? `<div class="row-error">${esc(e.error)}</div>` : ""}</td>
         <td class="small">${esc(e.ref_no)}</td>
         <td class="num">${money(e.debit)}</td>
         <td class="num">${money(e.credit)}</td>
@@ -602,6 +850,10 @@
         </td>
       </tr>`).join("")
       : `<tr><td colspan="10" class="empty">No entries${filter !== "all" ? " with status " + filter : ""}.</td></tr>`;
+    if (keepNarr) {
+      const box = startNarrationEdit(keepNarr.id, keepNarr.value);
+      if (box) box.setSelectionRange(keepNarr.start, keepNarr.end);
+    }
     if (keep) {
       const el = document.querySelector(`#entries [data-ledger="${keep.id}"]`);
       if (el && !el.disabled) {
@@ -613,6 +865,27 @@
 
     const all = current.entries;
     const count = (s) => all.filter((e) => e.status === s).length;
+
+    // status tabs show how many rows each would list with the other filters applied
+    const fv = filterValues();
+    const pool = all.filter((e) => matches(e, fv, true));
+    document.querySelectorAll("#filters button").forEach((b) => {
+      const n = b.dataset.filter === "all" ? pool.length : pool.filter((e) => e.status === b.dataset.filter).length;
+      b.innerHTML = `${b.dataset.filter[0].toUpperCase()}${b.dataset.filter.slice(1)}<span class="n">${n}</span>`;
+    });
+
+    const chips = activeFilters();
+    const filtered = chips.length > 0 || filter !== "all";
+    $("filter-count").textContent = chips.length;
+    $("filter-count").classList.toggle("hidden", !chips.length);
+    $("filter-chips").innerHTML = chips.map((c, i) =>
+      `<span class="chip">${esc(c.label)}<button type="button" data-remove-filter="${i}" aria-label="Remove filter ${esc(c.label)}">&times;</button></span>`).join("");
+    $("filter-bar").classList.toggle("hidden", !filtered);
+    if (filtered) {
+      const vsum = (k) => rows.filter((e) => e.status !== "skipped").reduce((t, e) => t + Number(e[k] || 0), 0);
+      $("filter-summary").innerHTML = `Showing <b>${rows.length}</b> of ${all.length} · withdrawals <b>${money(vsum("debit")) || "0.00"}</b>` +
+        ` · deposits <b>${money(vsum("credit")) || "0.00"}</b>`;
+    }
     const sum = (k) => all.filter((e) => e.status !== "skipped").reduce((t, e) => t + Number(e[k] || 0), 0);
     $("totals").innerHTML = `
       <div><span>Entries</span>${all.length}</div>
@@ -626,7 +899,9 @@
 
     const selectable = rows.filter((e) => !locked(e));
     $("check-all").checked = selectable.length > 0 && selectable.every((e) => selected.has(e.id));
-    $("validate-btn").textContent = selected.size ? `Validate selected (${selected.size})` : "Validate all pending";
+    const pendingShown = rows.filter((e) => e.status === "pending").length;
+    $("validate-btn").textContent = selected.size ? `Validate selected (${selected.size})`
+      : filtered ? `Validate ${pendingShown} pending shown` : "Validate all pending";
     const pushable = count("validated") + count("failed");
     $("push-btn").textContent = `Push to Tally (${pushable})`;
     $("push-btn").disabled = !pushable;
@@ -640,12 +915,13 @@
   }
 
   $("filters").addEventListener("click", (e) => {
-    if (!e.target.dataset.filter) return;
-    filter = e.target.dataset.filter;
-    document.querySelectorAll("#filters button").forEach((b) => b.classList.toggle("active", b === e.target));
-    renderReview();
+    const tab = e.target.closest("button[data-filter]"); // the click may land on the count inside
+    if (!tab) return;
+    filter = tab.dataset.filter;
+    document.querySelectorAll("#filters button").forEach((b) => b.classList.toggle("active", b === tab));
+    onFiltersChanged();
   });
-  $("entry-search").addEventListener("input", renderReview);
+  $("entry-search").addEventListener("input", onFiltersChanged);
 
   $("check-all").addEventListener("change", (e) => {
     visibleEntries().filter((x) => !locked(x)).forEach((x) => (e.target.checked ? selected.add(x.id) : selected.delete(x.id)));
@@ -788,7 +1064,7 @@
   $("validate-btn").addEventListener("click", () => withButton($("validate-btn"), async () => {
     const ids = selected.size
       ? [...selected]
-      : current.entries.filter((e) => e.status === "pending").map((e) => e.id);
+      : visibleEntries().filter((e) => e.status === "pending").map((e) => e.id); // respects filters
     if (!ids.length) throw new Error("Nothing to validate.");
     const ledgers = {}, voucher_types = {};
     ids.forEach((id) => {

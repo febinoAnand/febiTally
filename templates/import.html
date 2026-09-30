@@ -6,27 +6,22 @@
   <button class="btn hidden" id="new-import-btn">+ New import</button>{% endblock %}
 {% block content %}
 <div class="steps">
-  <div class="step active" id="step-1"><span class="n">1</span>Company &amp; bank</div>
-  <div class="step" id="step-2"><span class="n">2</span>Upload statement</div>
+  <div class="step active" id="step-1"><span class="n">1</span>Company</div>
+  <div class="step" id="step-2"><span class="n">2</span>Upload statement &amp; choose bank</div>
   <div class="step" id="step-3"><span class="n">3</span>Review, validate &amp; push</div>
 </div>
 
 <!-- Step 1 + 2 -->
 <div id="setup">
   <div class="card">
-    <div class="card-head"><h2>1. Company &amp; bank ledger</h2></div>
+    <div class="card-head"><h2>1. Company</h2></div>
     <div class="card-body">
       <div id="tally-alert" class="alert alert-error hidden"></div>
       <div class="row row-top">
-        <div class="field">
+        <div class="field" style="max-width:520px">
           <label for="company">Company (open in Tally Prime)</label>
           <select id="company"></select>
-        </div>
-        <div class="field">
-          <label for="bank-ledger">Bank ledger</label>
-          <select id="bank-ledger" disabled><option value="">Select company first</option></select>
-          <label class="check help" for="show-all-ledgers">
-            <input type="checkbox" id="show-all-ledgers"> Show all ledgers, not only bank accounts</label>
+          <div class="help">The bank account is chosen after you upload the statement.</div>
         </div>
       </div>
       <div id="ledger-status"></div>
@@ -84,9 +79,48 @@
           <button data-filter="skipped">Skipped</button>
         </div>
         <span class="spacer"></span>
-        <span class="muted small" title="Tab: next row's ledger (Shift+Tab: previous). Enter on a name that is not in Tally: create it."><kbd>Tab</kbd> next · <kbd>Enter</kbd> create new</span>
         <button class="btn btn-sm" id="fill-btn" title="Apply a ledger to all selected rows">Set ledger for selected…</button>
-        <input type="text" id="entry-search" placeholder="Search narration…" style="width:220px">
+        <input type="search" id="entry-search" placeholder="Search narration, ledger, ref…" style="width:230px">
+        <button type="button" class="btn btn-sm" id="filter-toggle" aria-expanded="false" aria-controls="filter-panel">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 5h18l-7 8v6l-4 2v-8z"/></svg>
+          Filters <span class="count-pill hidden" id="filter-count"></span></button>
+      </div>
+      <div class="filter-panel hidden" id="filter-panel">
+        <div class="filter-grid">
+          <div class="field"><label for="f-from">Date from</label><input type="date" id="f-from"></div>
+          <div class="field"><label for="f-to">Date to</label><input type="date" id="f-to"></div>
+          <div class="field"><label for="f-dir">Type</label>
+            <select id="f-dir">
+              <option value="">Withdrawals &amp; deposits</option>
+              <option value="out">Withdrawals only</option>
+              <option value="in">Deposits only</option>
+            </select></div>
+          <div class="field"><label for="f-vtype">Voucher</label>
+            <select id="f-vtype">
+              <option value="">Any voucher type</option>
+              <option>Payment</option><option>Receipt</option><option>Contra</option>
+            </select></div>
+          <div class="field"><label for="f-ledger-mode">Ledger</label>
+            <select id="f-ledger-mode">
+              <option value="">Any ledger</option>
+              <option value="unset">Not set</option>
+              <option value="missing">Not in Tally</option>
+              <option value="is">Is…</option>
+            </select>
+            <input type="text" id="f-ledger" list="ledger-list" placeholder="Ledger name" class="hidden" style="margin-top:6px"></div>
+          <div class="field"><label for="f-min">Amount</label>
+            <div class="range">
+              <input type="number" id="f-min" min="0" step="0.01" placeholder="Min" aria-label="Minimum amount">
+              <span class="muted">–</span>
+              <input type="number" id="f-max" min="0" step="0.01" placeholder="Max" aria-label="Maximum amount">
+            </div></div>
+        </div>
+      </div>
+      <div class="filter-bar hidden" id="filter-bar">
+        <div class="chips" id="filter-chips"></div>
+        <span class="spacer"></span>
+        <span class="small" id="filter-summary"></span>
+        <button type="button" class="btn btn-sm" id="filter-clear">Clear filters</button>
       </div>
     </div>
     <div class="table-wrap">
@@ -100,7 +134,11 @@
         <tbody id="entries"></tbody>
       </table>
     </div>
-    <div class="totals" id="totals"></div>
+    <div class="totals">
+      <div class="totals" id="totals" style="padding:0;border:0"></div>
+      <span class="muted small kbd-hint" title="Tab: next row's ledger (Shift+Tab: previous). Enter on a name that is not in Tally: create it. Click a narration to edit it.">
+        <kbd>Tab</kbd> next ledger · <kbd>Enter</kbd> create new ledger · click a narration to edit</span>
+    </div>
   </div>
   <datalist id="ledger-list"></datalist>
 </div>
@@ -111,7 +149,8 @@
     <div class="modal-head">
       <div>
         <h2 id="map-title">Map statement columns</h2>
-        <div class="muted small" id="map-sub"></div>
+        <div class="muted small"><span id="map-sub"></span> · Bank: <b id="map-bank"></b>
+          <a href="#" id="map-change-bank">Change</a></div>
       </div>
       <button class="close-x" data-close="mapping-modal">&times;</button>
     </div>
@@ -140,6 +179,36 @@
       <button class="btn btn-primary" id="mapping-apply" disabled>Import entries</button>
     </div>
   </div>
+</div>
+
+<!-- Which bank ledger the uploaded statement belongs to -->
+<div class="modal-backdrop hidden" id="bank-modal">
+  <form class="modal" id="bank-form">
+    <div class="modal-head">
+      <div>
+        <h2>Which bank account is this statement for?</h2>
+        <div class="muted small" id="bank-file"></div>
+      </div>
+      <button type="button" class="close-x" data-close="bank-modal">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="facts" id="bank-facts"></div>
+      <div class="field">
+        <label for="bank-choice">Bank ledger in Tally</label>
+        <select id="bank-choice" required></select>
+        <div class="help" id="bank-reason"></div>
+      </div>
+      <label class="check help" for="bank-show-all">
+        <input type="checkbox" id="bank-show-all"> Show all ledgers, not only bank accounts</label>
+      <div class="alert alert-warning small hidden" id="bank-empty" style="margin:12px 0 0">
+        No bank ledgers found for this company. Create one on the <a href="/ledgers">Ledgers</a> page
+        (under Bank Accounts) and fetch again, or show all ledgers.</div>
+    </div>
+    <div class="modal-foot">
+      <button type="button" class="btn" data-close="bank-modal">Cancel</button>
+      <button type="submit" class="btn btn-primary" id="bank-continue">Continue</button>
+    </div>
+  </form>
 </div>
 
 <!-- Password for a protected statement -->
