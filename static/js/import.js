@@ -766,27 +766,44 @@
     return groups;
   }
 
-  let createFor = null; // {entryId, name}
+  let createFor = null; // {entryIds: [...], name, focusId, bulk}
 
   function rowsWanting(name) {
     const key = ledgerKey(name);
     return current.entries.filter((e) => !locked(e) && ledgerKey(missingLedger(e)) === key);
   }
 
-  async function openCreateLedger(entryId, name) {
+  /* Create dialog for one row (from its Ledger box / Create button). */
+  function openCreateLedger(entryId, name) {
+    const entry = entryById(entryId);
+    const context = entry
+      ? `For ${fmtDate(entry.txn_date)} · ${entry.narration} · ${money(entry.debit || entry.credit)} (${entry.voucher_type})`
+      : "";
+    return showCreateLedger({ entryIds: [Number(entryId)], focusId: Number(entryId), bulk: false }, name, context);
+  }
+
+  /* Create dialog for several rows (from "Set ledger for selected…"). */
+  function openCreateLedgerForRows(ids, name) {
+    const rows = ids.map(entryById).filter(Boolean);
+    const out = rows.reduce((t, e) => t + Number(e.debit || 0), 0);
+    const inn = rows.reduce((t, e) => t + Number(e.credit || 0), 0);
+    const context = `For ${rows.length} selected row${rows.length === 1 ? "" : "s"}` +
+      (out ? ` · withdrawals ${money(out)}` : "") + (inn ? ` · deposits ${money(inn)}` : "");
+    return showCreateLedger({ entryIds: ids.map(Number), focusId: null, bulk: true }, name, context);
+  }
+
+  async function showCreateLedger(target, name, context) {
     name = (name || "").trim();
     if (!name) return;
-    createFor = { entryId: Number(entryId), name };
-    const entry = entryById(entryId);
+    createFor = Object.assign(target, { name });
     $("cl-name").value = name;
     $("cl-opening").value = 0;
     let lastGroup = "";
     try { lastGroup = localStorage.getItem("febitally.newLedgerGroup") || ""; } catch (_) { /* storage blocked */ }
     $("cl-parent").value = lastGroup;
-    $("cl-context").textContent = entry
-      ? `For ${fmtDate(entry.txn_date)} · ${entry.narration} · ${money(entry.debit || entry.credit)} (${entry.voucher_type})`
-      : "";
-    const others = rowsWanting(name).filter((e) => e.id !== createFor.entryId);
+    $("cl-context").textContent = context;
+    $("cl-save").textContent = target.bulk ? `Create & apply to ${target.entryIds.length} row${target.entryIds.length === 1 ? "" : "s"}` : "Create & use";
+    const others = rowsWanting(name).filter((e) => !createFor.entryIds.includes(e.id));
     $("cl-apply-all-wrap").classList.toggle("hidden", !others.length);
     $("cl-apply-all").checked = true;
     $("cl-apply-all-label").textContent = `Also use it for ${others.length} other row${others.length === 1 ? "" : "s"} wanting “${name}”`;
@@ -817,13 +834,14 @@
       const finalName = existing || name;
       const targets = $("cl-apply-all").checked && !$("cl-apply-all-wrap").classList.contains("hidden")
         ? rowsWanting(createFor.name) : [];
-      const ids = new Set([createFor.entryId, ...targets.map((t) => t.id)]);
+      const ids = new Set([...createFor.entryIds, ...targets.map((t) => t.id)]);
       await Promise.all([...ids].map((id) => patchEntry(id, { ledger: finalName })));
       closeModal("create-ledger-modal");
-      const back = createFor.entryId;
+      const { focusId, bulk } = createFor;
       createFor = null;
+      if (bulk) toast(`Ledger “${finalName}” set on ${ids.size} row${ids.size === 1 ? "" : "s"}.`, "success");
       renderReview();
-      const box = document.querySelector(`#entries [data-ledger="${back}"]`);
+      const box = focusId && document.querySelector(`#entries [data-ledger="${focusId}"]`);
       if (box) box.focus();
     });
   });
@@ -1164,17 +1182,45 @@
   $("fill-btn").addEventListener("click", () => {
     if (!selected.size) return toast("Select rows first.", "error");
     $("fill-ledger").value = "";
+    $("fill-sub").textContent = `${selected.size} row${selected.size === 1 ? "" : "s"} selected`;
+    updateFillHint();
     openModal("fill-modal");
     $("fill-ledger").focus();
   });
+
+  /* Under the ledger box: ✓ with the ledger's group when it exists, else a create button. */
+  function updateFillHint() {
+    const typed = $("fill-ledger").value.trim();
+    const match = typed && canonicalLedger(typed);
+    const hint = $("fill-hint");
+    if (!typed) {
+      hint.innerHTML = "";
+    } else if (match) {
+      const l = current.ledgerInfo.get(match) || {};
+      hint.innerHTML = `<span class="ok">✓ ${esc(match)}${l.parent ? " · " + esc(l.parent) : ""}</span>` +
+        (isCashBank(match) ? ` <span class="muted">· cash/bank ledger: rows become Contra</span>` : "");
+    } else {
+      hint.innerHTML = `<span class="muted">Not a ledger in Tally.</span>
+        <button type="button" class="link-btn" id="fill-create" style="display:inline;margin:0 0 0 6px">+ Create “${esc(typed)}” in Tally</button>`;
+    }
+    $("fill-apply").textContent = typed && !match ? "Create & apply…" : "Apply";
+  }
+  $("fill-ledger").addEventListener("input", updateFillHint);
+  $("fill-hint").addEventListener("click", (e) => {
+    if (e.target.id === "fill-create") $("fill-form").requestSubmit();
+  });
+
   $("fill-form").addEventListener("submit", async (e) => {
     e.preventDefault();
-    const ledger = $("fill-ledger").value.trim();
-    if (!current.ledgers.includes(ledger)) return toast(`"${ledger}" is not a ledger in Tally.`, "error");
+    const typed = $("fill-ledger").value.trim();
+    if (!typed) return;
+    const ids = [...selected];
+    const ledger = canonicalLedger(typed);
     closeModal("fill-modal");
+    if (!ledger) return openCreateLedgerForRows(ids, typed); // new name: create in Tally, then apply
     try {
-      await Promise.all([...selected].map((id) => patchEntry(id, { ledger })));
-      toast(`Ledger set on ${selected.size} rows.`, "success");
+      await Promise.all(ids.map((id) => patchEntry(id, { ledger })));
+      toast(`Ledger “${ledger}” set on ${ids.length} row${ids.length === 1 ? "" : "s"}.`, "success");
     } catch (err) {
       toast(err.message, "error");
     }

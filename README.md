@@ -67,7 +67,7 @@ If the statement has its own ledger column, map it to **Ledger (Tally)** in the 
 
 In the review table, click a **narration** to edit it in place; it becomes the voucher narration in Tally. **Enter** or clicking away saves, **Esc** cancels and **Shift+Enter** adds a line. Editing only the narration keeps a validated row validated. Pushed rows are read-only.
 
-In the review table, a row whose ledger is not in Tally shows a **+ Create "…" in Tally** button. That covers a typed name or an unmatched name from the statement's Ledger column. Pressing **Enter** in the Ledger box does the same. The dialog asks for the name, group and opening balance, creates the ledger in Tally, and assigns it to the row. It can also assign it to other rows that want the same name.
+In the review table, a row whose ledger is not in Tally shows a **+ Create "…" in Tally** button. That covers a typed name or an unmatched name from the statement's Ledger column. Pressing **Enter** in the Ledger box does the same. The dialog asks for the name, group and opening balance, creates the ledger in Tally, and assigns it to the row. It can also assign it to other rows that want the same name. The same applies in **Set ledger for selected…**. If you type a name that isn't in Tally, a **+ Create "…" in Tally** button appears, and Enter does the same. The new ledger is created in Tally and set on every selected row.
 
 **Voucher types.**
 - A withdrawal becomes a **Payment** and a deposit a **Receipt**.

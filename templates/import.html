@@ -325,13 +325,21 @@
 <!-- Bulk ledger -->
 <div class="modal-backdrop hidden" id="fill-modal">
   <form class="modal" id="fill-form">
-    <div class="modal-head"><h2>Set ledger for selected rows</h2><button type="button" class="close-x" data-close="fill-modal">&times;</button></div>
+    <div class="modal-head">
+      <div><h2>Set ledger for selected rows</h2><div class="muted small" id="fill-sub"></div></div>
+      <button type="button" class="close-x" data-close="fill-modal">&times;</button>
+    </div>
     <div class="modal-body">
-      <div class="field"><label for="fill-ledger">Ledger</label><input type="text" id="fill-ledger" list="ledger-list" required></div>
+      <div class="field" style="margin-bottom:0">
+        <label for="fill-ledger">Ledger</label>
+        <input type="text" id="fill-ledger" list="ledger-list" required autocomplete="off"
+               placeholder="Pick a ledger, or type a new name to create it">
+        <div class="help fill-hint" id="fill-hint" aria-live="polite"></div>
+      </div>
     </div>
     <div class="modal-foot">
       <button type="button" class="btn" data-close="fill-modal">Cancel</button>
-      <button type="submit" class="btn btn-primary">Apply</button>
+      <button type="submit" class="btn btn-primary" id="fill-apply">Apply</button>
     </div>
   </form>
 </div>

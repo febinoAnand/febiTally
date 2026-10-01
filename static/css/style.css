@@ -372,3 +372,5 @@ tr.saved-flash td { animation: savedflash 1s ease-out; }
   border: 3px solid var(--primary-soft); border-top-color: var(--primary); animation: spin .8s linear infinite; }
 @keyframes fadein { from { opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
+.fill-hint { min-height: 18px; }
+.fill-hint .ok { color: var(--success); font-weight: 500; }
