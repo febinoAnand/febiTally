@@ -91,17 +91,126 @@
     return out;
   };
 
-  $("upload-btn").addEventListener("click", () => withButton($("upload-btn"), async () => {
-    const fd = new FormData();
-    fd.append("file", file);
-    fd.append("company", companySel.value);
+  /* ------------------------------------------------------------ upload + read with progress */
+
+  // Upload (real % from the browser), then read on the server in the background (stage and page
+  // counter polled), then /preview, which is fast because the server keeps the parsed file.
+  const job = { cancelled: false, xhr: null, timer: null, showTimer: null };
+
+  function fmtBytes(n) {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+    return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  function progressOpen(title, fileName) {
+    job.cancelled = false;
+    $("prog-title").textContent = title;
+    $("prog-file").textContent = fileName || "";
+    progressSet("Starting…", null);
+    clearTimeout(job.showTimer);
+    // only show the popup if the work takes a moment: small files go straight through
+    job.showTimer = setTimeout(() => openModal("progress-modal"), 250);
+  }
+
+  function progressSet(stage, percent, detail) {
+    $("prog-stage").textContent = stage;
+    const bar = $("prog-bar");
+    bar.classList.toggle("indeterminate", percent === null);
+    bar.style.width = percent === null ? "" : `${Math.max(2, Math.min(100, percent))}%`;
+    $("prog-track").setAttribute("aria-valuenow", percent === null ? "" : String(Math.round(percent)));
+    $("prog-detail").textContent = detail || "";
+  }
+
+  function progressClose() {
+    clearTimeout(job.showTimer);
+    clearTimeout(job.timer);
+    closeModal("progress-modal");
+  }
+
+  $("prog-cancel").addEventListener("click", () => {
+    job.cancelled = true;
+    if (job.xhr) job.xhr.abort();
+    progressClose();
+    toast("Upload cancelled.", "info");
+  });
+
+  /* XHR (not fetch) so upload progress can be reported. Resolves with the JSON reply. */
+  function uploadWithProgress(f) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      job.xhr = xhr;
+      xhr.open("POST", "/api/imports/upload");
+      xhr.upload.onprogress = (e) => {
+        if (!e.lengthComputable) return progressSet("Uploading…", null);
+        const pct = (100 * e.loaded) / e.total;
+        progressSet(pct >= 100 ? "Upload complete" : "Uploading…", pct,
+          `${fmtBytes(e.loaded)} of ${fmtBytes(e.total)} · ${Math.round(pct)}%`);
+      };
+      xhr.onload = () => {
+        let data = {};
+        try { data = JSON.parse(xhr.responseText); } catch (_) { /* not JSON */ }
+        if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+        else reject(new ApiError(data.error || (xhr.status === 413 ? "The file is too large." : `Upload failed (${xhr.status})`), xhr.status, data));
+      };
+      xhr.onerror = () => reject(new ApiError("Upload failed: cannot reach the FebiTally server.", 0));
+      xhr.onabort = () => reject(new ApiError("cancelled", 0, { cancelled: true }));
+      const fd = new FormData();
+      fd.append("file", f);
+      xhr.send(fd);
+    });
+  }
+
+  /* Start the server-side read and poll it until done. Rejects with need_password etc. */
+  async function loadWithProgress(token, password) {
+    let state = await api("POST", `/api/imports/${token}/load`, password ? { password } : {});
+    const headers = password ? { "X-Statement-Password": password } : {};
+    while (state.status === "running") {
+      if (job.cancelled) throw new ApiError("cancelled", 0, { cancelled: true });
+      const label = `${state.stage}…`;
+      const detail = [state.total ? `${state.done} of ${state.total} pages read · ${state.percent || 0}%` : "",
+        state.elapsed >= 2 ? `${Math.round(state.elapsed)} s elapsed` : ""].filter(Boolean).join(" · ");
+      progressSet(label, state.total ? state.percent || 0 : null, detail);
+      await new Promise((r) => { job.timer = setTimeout(r, 350); });
+      const resp = await fetch(`/api/imports/${token}/load`, { headers });
+      state = await resp.json();
+      if (!resp.ok) throw new ApiError(state.error || "Reading the file failed.", resp.status, state);
+    }
+    if (state.status === "error") throw new ApiError(state.error, 422, Object.assign({ token }, state));
+    return state;
+  }
+
+  /* Read (with progress) and fetch the mapping data; then ask for the bank. */
+  async function readStatement(token, filename, password) {
     try {
-      preview = await api("POST", "/api/imports/preview", fd);
+      await loadWithProgress(token, password);
+      if (job.cancelled) return;
+      progressSet("Detecting columns…", null);
+      const r = await api("POST", "/api/imports/preview", { token, password, company: companySel.value });
+      if (job.cancelled) return;
+      progressClose();
+      preview = Object.assign(r, password ? { password } : {});
+      askBank();
     } catch (e) {
-      if (e.data.need_password) return askPassword(e.data);
+      progressClose();
+      if (e.data && e.data.cancelled) return;
+      if (e.data && e.data.need_password) return askPassword(Object.assign({ token, filename }, e.data));
       throw e;
     }
-    askBank();
+  }
+
+  $("upload-btn").addEventListener("click", () => withButton($("upload-btn"), async () => {
+    progressOpen("Uploading statement", `${file.name} · ${fmtBytes(file.size)}`);
+    let up;
+    try {
+      up = await uploadWithProgress(file);
+    } catch (e) {
+      progressClose();
+      if (e.data && e.data.cancelled) return;
+      throw e;
+    }
+    $("prog-title").textContent = "Reading statement";
+    await readStatement(up.token, up.filename);
   }));
 
   /* ------------------------------------------------------------ which bank ledger (popup) */
@@ -203,21 +312,13 @@
     const password = $("pw-input").value;
     if (!password) return showPasswordError("Enter the password.");
     withButton($("pw-unlock"), async () => {
-      try {
-        const r = await api("POST", "/api/imports/preview", { token: pendingUnlock.token, password, company: companySel.value });
-        preview = Object.assign(r, { password });
-      } catch (err) {
-        if (err.data.need_password) {
-          showPasswordError(err.message);
-          $("pw-input").select();
-          return;
-        }
-        throw err;
-      }
+      const { token, filename } = pendingUnlock;
       pendingUnlock = null;
       $("pw-input").value = "";
       closeModal("password-modal");
-      askBank();
+      // a wrong password comes back through askPassword() with the error shown
+      progressOpen("Reading statement", filename);
+      await readStatement(token, filename, password);
     });
   });
 

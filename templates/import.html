@@ -181,6 +181,26 @@
   </div>
 </div>
 
+<!-- Upload / read progress -->
+<div class="modal-backdrop hidden" id="progress-modal">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="prog-title">
+    <div class="modal-head">
+      <div><h2 id="prog-title">Uploading statement</h2><div class="muted small" id="prog-file"></div></div>
+    </div>
+    <div class="modal-body">
+      <div class="prog-stage" id="prog-stage" aria-live="polite">Starting…</div>
+      <div class="prog-track" id="prog-track" role="progressbar" aria-labelledby="prog-stage" aria-valuemin="0" aria-valuemax="100">
+        <div class="prog-bar indeterminate" id="prog-bar"></div>
+      </div>
+      <div class="muted small" id="prog-detail"></div>
+      <div class="help" style="margin-top:10px">Large PDFs are read page by page and can take a minute. You can cancel at any time.</div>
+    </div>
+    <div class="modal-foot">
+      <button type="button" class="btn" id="prog-cancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <!-- Which bank ledger the uploaded statement belongs to -->
 <div class="modal-backdrop hidden" id="bank-modal">
   <form class="modal" id="bank-form">

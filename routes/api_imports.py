@@ -1,7 +1,9 @@
 """Bank statement imports: upload + parse, review, validate and push to Tally."""
+import hashlib
 import json
 import os
 import re
+import threading
 import time
 import uuid
 
@@ -274,6 +276,79 @@ def _suggest_bank(company, account, filename, header):
     if best:
         return {"ledger": best, "reason": "Ledger name matches the bank named in the statement"}
     return None
+
+
+# --------------------------------------------------------------------------- background loading
+#
+# Big statements take a while to read (a long PDF is read page by page). The browser uploads the
+# file, starts a load job and polls its progress; the parsed file is then cached by the parser, so
+# /preview and the final import are fast.
+
+_JOBS = {}
+_JOBS_LOCK = threading.Lock()
+JOB_TTL_SECONDS = 3600
+
+
+def _job_key(token, password):
+    return token + ":" + hashlib.sha256((password or "").encode("utf-8")).hexdigest()
+
+
+def _public_state(job):
+    state = {k: v for k, v in job.items() if not k.startswith("_")}
+    state["elapsed"] = round(time.time() - job["_started"], 1)
+    if job.get("total"):
+        state["percent"] = min(100, int(100 * job["done"] / job["total"]))
+    return state
+
+
+def _run_load(job, path, password):
+    def progress(stage, done=None, total=None):
+        job.update(stage=stage, done=done or 0, total=total or 0)
+
+    try:
+        _info, rows = inspect_statement(path, None, None, password, progress)
+        job.update(status="done", stage="Ready", count=len(rows), done=1, total=1)
+    except PasswordRequired as exc:
+        job.update(status="error", error=str(exc), need_password=True, wrong_password=exc.wrong_password)
+    except Exception as exc:  # corrupt or unsupported files
+        job.update(status="error", error="Could not read the file: %s" % exc)
+
+
+@bp.post("/upload")
+def upload_statement():
+    """multipart: file. Saves the statement and returns its token; reading starts with /<token>/load."""
+    _cleanup_uploads()
+    upload = request.files.get("file")
+    token, path = _save_upload(upload)
+    return jsonify({"token": token, "filename": upload.filename, "size": os.path.getsize(path)}), 201
+
+
+@bp.post("/<token>/load")
+def start_load(token):
+    """Start reading an uploaded statement in the background (JSON: optional password)."""
+    path, _filename = _upload_path(token)
+    password = body(request).get("password") or None
+    key = _job_key(token, password)
+    now = time.time()
+    with _JOBS_LOCK:
+        for k in [k for k, j in _JOBS.items() if now - j["_started"] > JOB_TTL_SECONDS]:
+            del _JOBS[k]
+        job = _JOBS.get(key)
+        if job is None or job["status"] == "error":
+            job = {"status": "running", "stage": "Starting", "done": 0, "total": 0, "_started": now}
+            _JOBS[key] = job
+            threading.Thread(target=_run_load, args=(job, path, password), daemon=True).start()
+    return jsonify(_public_state(job)), 202
+
+
+@bp.get("/<token>/load")
+def load_progress(token):
+    """Progress of the load job. The password (if any) comes as a header so it never lands in URLs/logs."""
+    _upload_path(token)
+    job = _JOBS.get(_job_key(token, request.headers.get("X-Statement-Password") or None))
+    if job is None:
+        raise ApiError("No load in progress for this upload.", 404)
+    return jsonify(_public_state(job))
 
 
 @bp.post("/preview")

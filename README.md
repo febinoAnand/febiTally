@@ -37,6 +37,11 @@ Test connection uses the format currently selected on the form.
 
 An import is blocked until the company's ledgers have been fetched.
 
+**Large statements.**
+- After **Upload & map columns**, a progress popup shows the upload ("2.3 MB of 5.1 MB · 45%"), then the server reading the file ("Reading tables… 18 of 40 pages read"). It can be cancelled.
+- Long PDFs are read in parallel across CPU cores. If worker processes aren't available, the file is read page by page.
+- The parsed file is kept in memory. Changing columns in the mapping dialog, and the final import, take about a second instead of re-reading the file. In a test with a 300-page PDF on a 2-core machine, the first read took about 70 s and later steps about 1 s.
+
 **Choosing the bank.** After upload, the bank popup pre-selects the most likely bank ledger, in this order:
 1. the ledger used last time for the account number printed in the statement header;
 2. a bank ledger whose name contains the account's last digits (e.g. "HDFC Bank - 5678");

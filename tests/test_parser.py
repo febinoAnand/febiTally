@@ -99,3 +99,45 @@ def test_wrapped_narration_is_joined_but_summary_is_not():
              ["", "Debit Count", "", ""]]               # after a blank row: not joined
     rows = rows_from_table(table)
     assert [r["narration"] for r in rows] == ["NEFT TO ACME TRADERS PVT LTD"]
+
+
+def test_long_pdf_reports_page_progress_and_is_cached(tmp_path):
+    from services import statement_parser as sp
+    path = fixtures.make_long_pdf(str(tmp_path / "long.pdf"), pages=6, rows_per_page=20)
+    seen = []
+    info, rows = sp.inspect_statement(path, progress=lambda stage, done=None, total=None: seen.append((stage, done, total)))
+    assert len(rows) == 120
+    pages = [(d, t) for st, d, t in seen if st == "Reading tables"]
+    assert pages[0] == (0, 6) and pages[-1] == (6, 6) and len(pages) == 7
+
+    # second read comes from the cache: no progress callbacks, same result
+    seen.clear()
+    info2, rows2 = sp.inspect_statement(path, progress=lambda *a, **k: seen.append(a))
+    assert rows2 == rows and seen == []
+    # a changed file is read again
+    fixtures.make_long_pdf(path, pages=2, rows_per_page=5)
+    assert len(sp.inspect_statement(path)[1]) == 10
+
+
+def test_parallel_pdf_reading_matches_sequential(tmp_path, monkeypatch):
+    from services import statement_parser as sp
+    path = fixtures.make_long_pdf(str(tmp_path / "par.pdf"), pages=5, rows_per_page=12)
+    sequential = sp._read_table_uncached(path, None, sp._no_progress)
+    monkeypatch.setattr(sp, "PARALLEL_MIN_PAGES", 2)
+    monkeypatch.setattr(sp, "PAGES_PER_CHUNK", 1)
+    monkeypatch.setattr(sp.os, "cpu_count", lambda: 3)
+    seen = []
+    parallel = sp._read_table_uncached(path, None, lambda st, d=None, t=None: seen.append((st, d, t)))
+    assert parallel == sequential
+    assert seen[-1][1] == seen[-1][2]  # progress reaches the last page
+
+
+def test_parallel_failure_falls_back_to_sequential(tmp_path, monkeypatch):
+    from services import statement_parser as sp
+    path = fixtures.make_long_pdf(str(tmp_path / "fb.pdf"), pages=3, rows_per_page=5)
+    monkeypatch.setattr(sp, "PARALLEL_MIN_PAGES", 2)
+
+    def broken(*a, **k):
+        raise OSError("no worker processes here")
+    monkeypatch.setattr(sp, "_read_pdf_tables_parallel", broken)
+    assert len(sp.rows_from_table(sp._read_table_uncached(path, None, sp._no_progress))) == 15

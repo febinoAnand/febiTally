@@ -3,8 +3,11 @@
 Output row: {txn_date: 'YYYY-MM-DD', narration, ref_no, debit, credit, balance, ledger}
 (`ledger` is the statement's own ledger column, '' when not mapped.)
 """
+import hashlib
 import os
 import re
+import threading
+from collections import OrderedDict
 from datetime import datetime
 
 import pandas as pd
@@ -211,7 +214,51 @@ def _normalise(rows, mapping):
 
 # --------------------------------------------------------------------------- readers
 
-def read_table(path, password=None):
+# ---------------------------------------------------------------- cache + progress
+#
+# Reading a big statement (a long PDF especially) is slow, and the mapping dialog re-parses on
+# every change. The extracted cells are therefore kept in memory per file (and per password,
+# by hash only), so only the first read of an upload pays the cost.
+
+_CACHE = OrderedDict()
+_CACHE_LOCK = threading.Lock()
+CACHE_SIZE = 6
+
+
+def _no_progress(stage, done=None, total=None):
+    pass
+
+
+def _cached(kind, path, password, loader):
+    st = os.stat(path)
+    key = (kind, os.path.abspath(path), st.st_mtime_ns, st.st_size,
+           hashlib.sha256((password or "").encode("utf-8")).hexdigest())
+    with _CACHE_LOCK:
+        if key in _CACHE:
+            _CACHE.move_to_end(key)
+            return _CACHE[key]
+    value = loader()  # may raise (e.g. PasswordRequired): nothing is cached then
+    with _CACHE_LOCK:
+        _CACHE[key] = value
+        while len(_CACHE) > CACHE_SIZE:
+            _CACHE.popitem(last=False)
+    return value
+
+
+def forget(path):
+    """Drop cached reads of a file (e.g. when the upload is deleted)."""
+    target = os.path.abspath(path)
+    with _CACHE_LOCK:
+        for key in [k for k in _CACHE if k[1] == target]:
+            del _CACHE[key]
+
+
+def read_table(path, password=None, progress=None):
+    """Cached wrapper around _read_table_uncached (see there)."""
+    return _cached("table", path, password, lambda: _read_table_uncached(path, password, progress or _no_progress))
+
+
+def _read_table_uncached(path, password, progress):
     """Read a statement file into a 2D list of cells (all sheets / pages concatenated).
 
     Spreadsheet files are recognised by their content, not their extension: banks often send a
@@ -220,19 +267,23 @@ def read_table(path, password=None):
     """
     ext = os.path.splitext(path)[1].lower()
     if ext == ".pdf":
-        return _read_pdf_tables(path, password)
+        return _read_pdf_tables(path, password, progress)
     if ext not in (".xlsx", ".xls", ".csv"):
         raise ParseError("Unsupported file type: %s" % ext)
+    progress("Opening file")
     with open(path, "rb") as f:
         data = f.read()
     kind = sniff_format(data)
     if kind == "ole":
+        progress("Unlocking workbook")
         data = _decrypt_office(data, password)  # no-op for an unencrypted .xls
         kind = sniff_format(data)
     if kind == "pdf":
-        return _read_pdf_tables(path, password)
+        return _read_pdf_tables(path, password, progress)
     if kind in ("xlsx", "ole"):
+        progress("Reading workbook")
         return _read_workbook(data, "openpyxl" if kind == "xlsx" else "xlrd")
+    progress("Reading file")
     text = _decode_text(data)
     if kind == "html":
         return _read_html_tables(text)
@@ -416,16 +467,69 @@ def _read_csv_text(text):
     return [row for row in csv.reader(lines, delimiter=delimiter)]
 
 
-def _read_pdf_tables(path, password=None):
+PARALLEL_MIN_PAGES = 12   # below this, starting worker processes costs more than it saves
+PAGES_PER_CHUNK = 6
+
+
+def _pdf_tables_chunk(path, password, start, stop):
+    """Tables of pages [start, stop) — runs in a worker process for long PDFs."""
+    rows = []
+    with _open_pdf(path, password) as pdf:
+        for page in pdf.pages[start:stop]:
+            for t in page.extract_tables() or []:
+                rows.extend(t)
+            page.flush_cache()
+    return rows
+
+
+def _read_pdf_tables(path, password=None, progress=_no_progress):
+    """Rows of every table in the PDF, in page order.
+
+    Long PDFs are split into page chunks read in parallel by worker processes (table extraction
+    is CPU-bound and the slowest part of importing a big statement)."""
+    progress("Opening PDF")
+    with _open_pdf(path, password) as pdf:
+        total = len(pdf.pages)
+    workers = min(os.cpu_count() or 1, 8)
+    if total >= PARALLEL_MIN_PAGES and workers >= 2:
+        try:
+            return _read_pdf_tables_parallel(path, password, progress, total, workers)
+        except Exception:  # worker processes unavailable (e.g. restricted host): read page by page
+            pass
     table = []
     with _open_pdf(path, password) as pdf:
-        for page in pdf.pages:
+        for i, page in enumerate(pdf.pages, 1):
+            progress("Reading tables", i - 1, total)
             for t in page.extract_tables() or []:
                 table.extend(t)
+            page.flush_cache()  # keep memory flat on long statements
+    progress("Reading tables", total, total)
     return table
 
 
-def _read_pdf_lines(path, password=None):
+def _read_pdf_tables_parallel(path, password, progress, total, workers):
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    chunks = [(a, min(a + PAGES_PER_CHUNK, total)) for a in range(0, total, PAGES_PER_CHUNK)]
+    results, done = {}, 0
+    progress("Reading tables", 0, total)
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_pdf_tables_chunk, path, password, a, b): (a, b) for a, b in chunks}
+        for future in as_completed(futures):
+            a, b = futures[future]
+            results[a] = future.result()
+            done += b - a
+            progress("Reading tables", done, total)
+    return [row for a, _b in chunks for row in results[a]]
+
+
+def _read_pdf_lines(path, password=None, progress=None):
+    """Cached wrapper around _read_pdf_lines_uncached."""
+    return _cached("lines", path, password,
+                   lambda: _read_pdf_lines_uncached(path, password, progress or _no_progress))
+
+
+def _read_pdf_lines_uncached(path, password, progress):
     """Fallback for PDFs without ruled tables: parse text lines that start with a date.
 
     Line shape: <date> <narration...> [ref] <amount> [amount] <balance>. With two amounts we
@@ -434,8 +538,12 @@ def _read_pdf_lines(path, password=None):
     entries = []
     prev_balance = None
     with _open_pdf(path, password) as pdf:
-        for page in pdf.pages:
-            for line in (page.extract_text() or "").splitlines():
+        total = len(pdf.pages)
+        for i, page in enumerate(pdf.pages, 1):
+            progress("Reading text lines", i - 1, total)
+            text = page.extract_text() or ""
+            page.flush_cache()
+            for line in text.splitlines():
                 m = DATE_RE.match(line)
                 if not m:
                     if entries and line.strip() and not AMOUNT_RE.search(line):
@@ -522,14 +630,15 @@ RAW_PREVIEW_ROWS = 80
 RAW_CELL_CHARS = 60
 
 
-def inspect_statement(path, mapping=None, header_row=None, password=None):
+def inspect_statement(path, mapping=None, header_row=None, password=None, progress=None):
     """Everything the column-mapping dialog needs, plus the parsed rows.
 
     With `mapping` None, the detected header row and mapping are used. Returns (info, rows):
       info = {mode: 'table'|'text', detected, header_row, mapping, columns, raw, count, problem}
     mode 'text' means a PDF without tables, read line by line (column mapping does not apply).
     """
-    table = _clean_table(read_table(path, password))
+    progress = progress or _no_progress
+    table = _clean_table(read_table(path, password, progress))
     detected_row, detected_map = find_header(table)
     user_mapping = mapping is not None  # {} from the dialog means "nothing mapped", not "auto-detect"
     if not user_mapping:
@@ -541,7 +650,7 @@ def inspect_statement(path, mapping=None, header_row=None, password=None):
         start = header_row + 1 if header_row is not None else 0
         rows = _normalise(table[start:], mapping)
     if not rows and not user_mapping and path.lower().endswith(".pdf"):
-        rows = _read_pdf_lines(path, password)
+        rows = _read_pdf_lines(path, password, progress)
         if rows:
             mode, problem = "text", None
     if not mapping and mode == "table" and not user_mapping:

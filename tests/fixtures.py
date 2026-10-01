@@ -106,6 +106,26 @@ def make_encrypted_excel(path, password="secret"):
     return path
 
 
+def make_long_pdf(path, pages=25, rows_per_page=30):
+    """A long statement PDF (one ruled table per page), for progress and caching checks."""
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.platypus import PageBreak, SimpleDocTemplate, Table, TableStyle
+
+    story, n = [], 0
+    for p in range(pages):
+        data = [HEADER]
+        for r in range(rows_per_page):
+            n += 1
+            day = 1 + (n % 28)
+            data.append(["%02d/04/2026" % day, "UPI PAYMENT %d" % n, "R%d" % n, "%.2f" % (10 + n), "", "%.2f" % (100000 - n)])
+        t = Table(data)
+        t.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.5, colors.black)]))
+        story += [t, PageBreak()]
+    SimpleDocTemplate(path, pagesize=A4).build(story[:-1])
+    return path
+
+
 def make_disguised_xls(path, kind):
     """Files banks send with an .xls name that are really something else:
     'xlsx' (a modern workbook), 'html' (an HTML table), 'xml2003' (Excel 2003 XML), 'tsv' (text)."""

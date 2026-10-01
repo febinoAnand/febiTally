@@ -473,3 +473,55 @@ def test_edit_narration(client, fake_tally, tmp_path):
     client.post("/api/imports/%d/push" % import_id, json={"entry_ids": [rent["id"]]})
     assert fake_tally.vouchers[-1]["narration"] == "Office rent for April 2026\nCheque 000781"
     assert client.patch(url, json={"narration": "changed"}).status_code == 400
+
+
+def _wait_load(client, token, password=None):
+    import time as _t
+    headers = {"X-Statement-Password": password} if password else {}
+    for _ in range(200):
+        state = client.get("/api/imports/%s/load" % token, headers=headers).get_json()
+        if state["status"] != "running":
+            return state
+        _t.sleep(0.05)
+    raise AssertionError("load did not finish")
+
+
+def test_upload_then_background_load_with_progress(client, fake_tally, tmp_path):
+    client.post("/api/ledgers/fetch", json={"company": COMPANY})
+    path = fixtures.make_long_pdf(str(tmp_path / "long.pdf"), pages=4, rows_per_page=10)
+    with open(path, "rb") as f:
+        up = client.post("/api/imports/upload", data={"file": (f, "long.pdf")}, content_type="multipart/form-data")
+    assert up.status_code == 201
+    token = up.get_json()["token"]
+    assert up.get_json()["size"] > 0
+
+    started = client.post("/api/imports/%s/load" % token, json={})
+    assert started.status_code == 202 and started.get_json()["status"] in ("running", "done")
+    state = _wait_load(client, token)
+    assert state["status"] == "done" and state["count"] == 40 and state["percent"] == 100
+
+    p = client.post("/api/imports/preview", json={"token": token, "company": COMPANY}).get_json()
+    assert p["count"] == 40
+    r = client.post("/api/imports", data={"company": COMPANY, "bank_ledger": "HDFC Bank", "token": token,
+                                          "mapping": json.dumps(p["mapping"]), "header_row": str(p["header_row"])})
+    assert r.status_code == 201 and r.get_json()["count"] == 40
+
+    assert client.get("/api/imports/%s/load" % ("0" * 32)).status_code == 410  # unknown upload
+
+
+def test_background_load_of_protected_file(client, fake_tally, tmp_path):
+    path = fixtures.make_encrypted_pdf(str(tmp_path / "locked.pdf"))
+    with open(path, "rb") as f:
+        token = client.post("/api/imports/upload", data={"file": (f, "locked.pdf")},
+                            content_type="multipart/form-data").get_json()["token"]
+    client.post("/api/imports/%s/load" % token, json={})
+    state = _wait_load(client, token)
+    assert state["status"] == "error" and state["need_password"] and not state["wrong_password"]
+
+    client.post("/api/imports/%s/load" % token, json={"password": "nope"})
+    assert _wait_load(client, token, "nope")["wrong_password"]
+
+    client.post("/api/imports/%s/load" % token, json={"password": "secret"})
+    state = _wait_load(client, token, "secret")
+    assert state["status"] == "done" and state["count"] == 4
+    assert "secret" not in json.dumps(state)
