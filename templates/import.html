@@ -145,7 +145,14 @@
 
 <!-- Column mapping -->
 <div class="modal-backdrop hidden" id="mapping-modal">
-  <div class="modal xwide" role="dialog" aria-labelledby="map-title">
+  <div class="modal xwide has-overlay" role="dialog" aria-labelledby="map-title">
+    <div class="loading-overlay hidden" id="map-loading" role="status" aria-live="polite" tabindex="-1">
+      <div class="loading-box">
+        <div class="spinner" aria-hidden="true"></div>
+        <div class="loading-title">Updating preview…</div>
+        <div class="muted small">Applying your column choices to the statement</div>
+      </div>
+    </div>
     <div class="modal-head">
       <div>
         <h2 id="map-title">Map statement columns</h2>
@@ -174,7 +181,6 @@
       <div class="table-wrap map-table"><table class="small" id="map-sample"></table></div>
     </div>
     <div class="modal-foot">
-      <span class="muted small" id="map-status" style="margin-right:auto"></span>
       <button class="btn" data-close="mapping-modal">Cancel</button>
       <button class="btn btn-primary" id="mapping-apply" disabled>Import entries</button>
     </div>

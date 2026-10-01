@@ -450,16 +450,31 @@
     const ok = p.count > 0 && !clash;
     $("mapping-apply").disabled = !ok;
     $("mapping-apply").textContent = ok ? `Import ${p.count} entr${p.count === 1 ? "y" : "ies"}` : "Import entries";
-    $("map-status").textContent = "";
   }
 
   /* Re-parse on the server with the mapping shown in the dialog (debounced). */
+  /* Loading screen over the mapping dialog while the server re-parses with the new mapping.
+     Shown after a short delay, so quick updates don't flicker. */
+  let loadingTimer = null;
+  function mapLoading(on) {
+    clearTimeout(loadingTimer);
+    if (on) {
+      loadingTimer = setTimeout(() => {
+        $("map-loading").classList.remove("hidden");
+        $("map-loading").focus();
+      }, 150);
+    } else {
+      $("map-loading").classList.add("hidden");
+    }
+  }
+
   function refreshPreview() {
     clearTimeout(previewTimer);
-    $("map-status").textContent = "Updating preview…";
     $("mapping-apply").disabled = true;
     const seq = ++previewSeq;
     previewTimer = setTimeout(async () => {
+      mapLoading(true);
+      const returnFocus = document.activeElement;
       try {
         const r = await api("POST", "/api/imports/preview", {
           token: preview.token, mapping: currentMapping(), header_row: currentHeaderRow(),
@@ -469,8 +484,12 @@
         Object.assign(preview, { count: r.count, sample: r.sample, problem: r.problem, userChanged: true });
         renderPreview();
       } catch (e) {
-        $("map-status").textContent = "";
-        toast(e.message, "error");
+        if (seq === previewSeq) toast(e.message, "error");
+      } finally {
+        if (seq === previewSeq) {
+          mapLoading(false);
+          if (returnFocus && document.contains(returnFocus)) returnFocus.focus();
+        }
       }
     }, 250);
   }

@@ -359,3 +359,16 @@ tr.saved-flash td { animation: savedflash 1s ease-out; }
 @media (prefers-reduced-motion: reduce) {
   .prog-bar.indeterminate { animation: none; left: 0; width: 100% !important; opacity: .35; }
 }
+
+/* ---------- loading screen over a dialog */
+.modal.has-overlay { position: relative; }
+.loading-overlay { position: absolute; inset: 0; z-index: 5; display: grid; place-items: center;
+  background: rgba(255, 255, 255, .78); backdrop-filter: blur(1.5px); border-radius: inherit;
+  animation: fadein .15s ease-out; outline: none; }
+.loading-box { text-align: center; padding: 20px 28px; border-radius: 12px; background: var(--surface);
+  box-shadow: 0 10px 30px rgba(15, 23, 42, .15); border: 1px solid var(--border); }
+.loading-title { font-weight: 600; margin: 12px 0 4px; }
+.spinner { width: 34px; height: 34px; margin: 0 auto; border-radius: 50%;
+  border: 3px solid var(--primary-soft); border-top-color: var(--primary); animation: spin .8s linear infinite; }
+@keyframes fadein { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
