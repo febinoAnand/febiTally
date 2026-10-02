@@ -123,6 +123,14 @@
         <button type="button" class="btn btn-sm" id="filter-clear">Clear filters</button>
       </div>
     </div>
+    <div class="results has-overlay">
+    <div class="loading-overlay results-loading hidden" id="filter-loading" role="status" aria-live="polite">
+      <div class="loading-box">
+        <div class="spinner" aria-hidden="true"></div>
+        <div class="loading-title">Applying filters…</div>
+        <div class="muted small" id="filter-loading-sub"></div>
+      </div>
+    </div>
     <div class="table-wrap">
       <table>
         <thead><tr>
@@ -138,6 +146,7 @@
       <div class="totals" id="totals" style="padding:0;border:0"></div>
       <span class="muted small kbd-hint" title="Tab: next row's ledger (Shift+Tab: previous). Enter on a name that is not in Tally: create it. Click a narration to edit it.">
         <kbd>Tab</kbd> next ledger · <kbd>Enter</kbd> create new ledger · click a narration to edit</span>
+    </div>
     </div>
   </div>
   <datalist id="ledger-list"></datalist>

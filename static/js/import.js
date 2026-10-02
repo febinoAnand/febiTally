@@ -12,6 +12,8 @@
   let file = null;
   let current = null; // {import, entries}
   let filter = "all";
+  const PAGE_SIZE = 200;      // review rows rendered at a time
+  let pageLimit = PAGE_SIZE;
   const selected = new Set();
 
   /* ------------------------------------------------------------ step 1: company + ledgers */
@@ -596,6 +598,7 @@
       .forEach((fid) => { $(fid).value = ""; });
     $("f-ledger").classList.add("hidden");
     filter = "all";
+    pageLimit = PAGE_SIZE;
     document.querySelectorAll("#filters button").forEach((b) => b.classList.toggle("active", b.dataset.filter === "all"));
     selected.clear();
     renderLedgerList();
@@ -695,12 +698,45 @@
     renderReview();
   }
 
+  /* Loading screen over the table while it is re-filtered. The redraw is synchronous, so the
+     overlay must be painted before it starts. Small redraws skip it (no flicker). */
+  let filterTimer = null;
+  const BIG_RENDER = 150; // rows; above this a redraw takes long enough to need the loading screen
+
+  function withTableLoading(title, work, rowsToRender) {
+    if (rowsToRender <= BIG_RENDER) return work();
+    $("filter-loading").querySelector(".loading-title").textContent = title;
+    $("filter-loading-sub").textContent = `${rowsToRender} row${rowsToRender === 1 ? "" : "s"} to display`;
+    $("filter-loading").classList.remove("hidden");
+    // two frames: the overlay is painted before the redraw blocks the page
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      try {
+        work();
+      } finally {
+        $("filter-loading").classList.add("hidden");
+      }
+    }));
+  }
+
+  function applyFilters() {
+    clearTimeout(filterTimer);
+    pageLimit = PAGE_SIZE; // a new filter starts from the first page
+    const before = document.querySelectorAll("#entries tr[data-id]").length;
+    // the redraw cost is clearing the old rows plus laying out the new ones
+    withTableLoading("Applying filters…", onFiltersChanged, Math.max(before, Math.min(PAGE_SIZE, current ? current.entries.length : 0)));
+  }
+  /* Typing (search, amounts, ledger name) waits for a short pause before filtering. */
+  function applyFiltersSoon() {
+    clearTimeout(filterTimer);
+    filterTimer = setTimeout(applyFilters, 250);
+  }
+
   function clearFilters() {
     ["entry-search", "f-from", "f-to", "f-dir", "f-vtype", "f-ledger-mode", "f-ledger", "f-min", "f-max"]
       .forEach((id) => { $(id).value = ""; });
     filter = "all";
     document.querySelectorAll("#filters button").forEach((b) => b.classList.toggle("active", b.dataset.filter === "all"));
-    onFiltersChanged();
+    applyFilters();
   }
 
   $("filter-toggle").addEventListener("click", () => {
@@ -708,17 +744,18 @@
     $("filter-toggle").setAttribute("aria-expanded", String(open));
     if (open) $("f-from").focus();
   });
+  ["f-ledger", "f-min", "f-max"].forEach((id) => $(id).addEventListener("input", applyFiltersSoon));
   ["f-from", "f-to", "f-dir", "f-vtype", "f-ledger-mode", "f-ledger", "f-min", "f-max"].forEach((id) => {
-    $(id).addEventListener("input", onFiltersChanged);
-    $(id).addEventListener("change", onFiltersChanged);
+    $(id).addEventListener("change", applyFilters);
   });
+  ["f-from", "f-to"].forEach((id) => $(id).addEventListener("input", applyFiltersSoon));
   $("f-ledger-mode").addEventListener("change", () => { if ($("f-ledger-mode").value === "is") $("f-ledger").focus(); });
   $("filter-clear").addEventListener("click", clearFilters);
   $("filter-chips").addEventListener("click", (e) => {
     const i = e.target.dataset.removeFilter;
     if (i === undefined) return;
     const f = activeFilters()[Number(i)];
-    if (f) { f.clear(); onFiltersChanged(); }
+    if (f) { f.clear(); applyFilters(); }
   });
 
   /* ------------------------------------------------------------ create a missing ledger */
@@ -963,7 +1000,11 @@
     const keepNarr = active && active.dataset && active.dataset.narrEdit
       ? { id: active.dataset.narrEdit, value: active.value, start: active.selectionStart, end: active.selectionEnd }
       : null;
-    $("entries").innerHTML = rows.length ? rows.map((e) => `
+    // Laying out thousands of rows (each with inputs) takes seconds, so only the first pageLimit
+    // matching rows are rendered. Filters, totals, select-all, validate and push still use all rows.
+    const shownRows = rows.slice(0, pageLimit);
+    const more = rows.length - shownRows.length;
+    $("entries").innerHTML = shownRows.length ? shownRows.map((e) => `
       <tr class="row-${e.status}" data-id="${e.id}">
         <td><input type="checkbox" data-check="${e.id}" ${selected.has(e.id) ? "checked" : ""} ${locked(e) ? "disabled" : ""}></td>
         <td style="white-space:nowrap">${fmtDate(e.txn_date)}</td>
@@ -988,6 +1029,13 @@
         </td>
       </tr>`).join("")
       : `<tr><td colspan="10" class="empty">No entries${filter !== "all" ? " with status " + filter : ""}.</td></tr>`;
+    $("entries").insertAdjacentHTML("beforeend", more > 0 ? `
+      <tr class="more-row"><td colspan="10">
+        <span class="muted">Showing ${shownRows.length} of ${rows.length} matching rows.</span>
+        <button type="button" class="btn btn-sm" data-show-more="${PAGE_SIZE}">Show next ${Math.min(PAGE_SIZE, more)}</button>
+        <button type="button" class="btn btn-sm" data-show-more="all">Show all ${rows.length}</button>
+        <span class="muted small">Filters, totals, select-all and validate cover all ${rows.length} rows.</span>
+      </td></tr>` : "");
     if (keepNarr) {
       const box = startNarrationEdit(keepNarr.id, keepNarr.value);
       if (box) box.setSelectionRange(keepNarr.start, keepNarr.end);
@@ -1057,9 +1105,17 @@
     if (!tab) return;
     filter = tab.dataset.filter;
     document.querySelectorAll("#filters button").forEach((b) => b.classList.toggle("active", b === tab));
-    onFiltersChanged();
+    applyFilters();
   });
-  $("entry-search").addEventListener("input", onFiltersChanged);
+  $("entry-search").addEventListener("input", applyFiltersSoon);
+
+  $("entries").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-show-more]");
+    if (!b) return;
+    const total = visibleEntries().length;
+    const target = b.dataset.showMore === "all" ? total : pageLimit + PAGE_SIZE;
+    withTableLoading("Loading rows…", () => { pageLimit = target; renderReview(); }, Math.min(target, total));
+  });
 
   $("check-all").addEventListener("change", (e) => {
     visibleEntries().filter((x) => !locked(x)).forEach((x) => (e.target.checked ? selected.add(x.id) : selected.delete(x.id)));

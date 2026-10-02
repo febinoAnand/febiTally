@@ -64,6 +64,8 @@ If the statement has its own ledger column, map it to **Ledger (Tally)** in the 
 - **Filters** narrows by date range, withdrawals/deposits, voucher type, ledger (not set / not in Tally / a specific ledger) and amount range.
 - Active filters appear as removable chips, with "Showing N of M" and totals for the filtered rows.
 - Select-all, **Set ledger for selected…** and **Validate** act only on the rows shown.
+- Large imports: the table renders 200 matching rows at a time, with **Show next 200** and **Show all** buttons. Filters, totals, select-all and Validate still cover every matching row.
+- While a filter is applied, a loading screen covers the table if the redraw is large. Typing in search or the amount boxes waits for a short pause before filtering.
 
 In the review table, click a **narration** to edit it in place; it becomes the voucher narration in Tally. **Enter** or clicking away saves, **Esc** cancels and **Shift+Enter** adds a line. Editing only the narration keeps a validated row validated. Pushed rows are read-only.
 
