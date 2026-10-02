@@ -20,6 +20,15 @@ def test_parse_helpers():
     assert parse_date("05-Apr-2026") == "2026-04-05"
     assert parse_date("2026-04-05 10:30:00") == "2026-04-05"
     assert parse_date("Opening balance") is None
+    # month names with any separator / case / 2-digit year
+    for text in ["01/Aug/2026", "01/AUG/2026", "01/aug/26", "01-Aug-2026", "01 Aug 2026", "01.Aug.2026",
+                 "01/Aug/2026 10:15:00", "Aug 01, 2026", "Aug 1st, 2026", "01-August-2026"]:
+        assert parse_date(text) == "2026-08-01", text
+    assert parse_date("1/Sept/2026") == "2026-09-01"
+    assert parse_date("31/Feb/2026") is None      # impossible date
+    assert parse_date("01/Foo/2026") is None      # not a month
+    assert parse_date("01/Augx/2026") is None
+    assert parse_date("01/08/2026") == "2026-08-01"  # numeric dates stay day-first
     assert parse_amount("1,23,456.50 Dr") == 123456.5
     assert parse_amount("") == 0.0
     assert parse_amount("₹ 500") == 500.0
@@ -141,3 +150,28 @@ def test_parallel_failure_falls_back_to_sequential(tmp_path, monkeypatch):
         raise OSError("no worker processes here")
     monkeypatch.setattr(sp, "_read_pdf_tables_parallel", broken)
     assert len(sp.rows_from_table(sp._read_table_uncached(path, None, sp._no_progress))) == 15
+
+
+def test_month_name_dates_import(tmp_path):
+    path = tmp_path / "aug.csv"
+    path.write_text("Date,Narration,Withdrawal,Deposit,Balance\n"
+                    "01/Aug/2026,NEFT AWS,8500.00,,91500.00\n"
+                    "15/Aug/2026,SALARY,,50000.00,141500.00\n"
+                    "02/SEP/26,ATM WDL,2000.00,,139500.00\n")
+    assert _summary(parse_statement(str(path))) == [
+        ("2026-08-01", 8500.0, 0.0), ("2026-08-15", 0.0, 50000.0), ("2026-09-02", 2000.0, 0.0)]
+
+
+def test_month_name_dates_in_text_pdf(tmp_path):
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+    path = str(tmp_path / "aug.pdf")
+    c = canvas.Canvas(path, pagesize=A4)
+    for i, line in enumerate(["STATEMENT", "Opening balance 100000.00",
+                              "01/Aug/2026 NEFT AWS 8,500.00 91,500.00",
+                              "03/Aug/2026 UPI ACME 12,000.00 1,03,500.00"]):
+        c.drawString(40, 800 - 18 * i, line)
+    c.save()
+    rows = parse_statement(path)
+    assert [(r["txn_date"], r["debit"], r["credit"]) for r in rows] == [
+        ("2026-08-01", 8500.0, 0.0), ("2026-08-03", 0.0, 12000.0)]

@@ -33,7 +33,14 @@ REQUIRED = ("txn_date", "narration")
 
 DATE_FORMATS = ["%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d-%m-%y", "%d.%m.%Y", "%d.%m.%y", "%Y-%m-%d",
                 "%d %b %Y", "%d-%b-%Y", "%d-%b-%y", "%d %b %y", "%d %B %Y", "%b %d, %Y", "%Y/%m/%d"]
-DATE_RE = re.compile(r"^\s*(\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}|\d{4}-\d{2}-\d{2}|\d{1,2}[ \-][A-Za-z]{3,9}[ \-]\d{2,4})")
+DATE_RE = re.compile(r"^\s*(\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}|\d{4}-\d{2}-\d{2}"
+                     r"|\d{1,2}[ \-/.][A-Za-z]{3,9}\.?[ \-/.]\d{2,4})")
+
+# Month-name dates in any separator style: 01/Aug/2026, 01-AUG-26, 01.Aug.2026, 1 Sept 2026, Aug 01, 2026
+MONTH_NAMES = ["january", "february", "march", "april", "may", "june", "july", "august", "september",
+               "october", "november", "december"]
+DMY_NAME_RE = re.compile(r"^(\d{1,2})[\s/\-.,]+([A-Za-z]{3,9})\.?[\s/\-.,]*(\d{2}|\d{4})$")
+MDY_NAME_RE = re.compile(r"^([A-Za-z]{3,9})\.?[\s/\-.,]+(\d{1,2})(?:st|nd|rd|th)?[\s/\-.,]+(\d{2}|\d{4})$", re.I)
 AMOUNT_RE = re.compile(r"-?\d{1,3}(?:,\d{2,3})*(?:\.\d{1,2})|-?\d+\.\d{1,2}")
 
 
@@ -68,12 +75,40 @@ def parse_date(value):
     if not text:
         return None
     text = re.sub(r"\s+\d{1,2}:\d{2}(:\d{2})?\s*(AM|PM)?$", "", text, flags=re.I)  # drop time part
+    named = _parse_month_name_date(text)
+    if named is not None:
+        return named or None  # "" = looked like a month-name date but is impossible (31/Feb)
     for fmt in DATE_FORMATS:
         try:
             return datetime.strptime(text, fmt).strftime("%Y-%m-%d")
         except ValueError:
             continue
     return None
+
+
+def _parse_month_name_date(text):
+    """'01/Aug/2026' -> '2026-08-01'. None if the text is not a month-name date at all,
+    '' if it is one but impossible (31/Feb/2026)."""
+    m = DMY_NAME_RE.match(text)
+    if m:
+        day, month, year = m.group(1), m.group(2), m.group(3)
+    else:
+        m = MDY_NAME_RE.match(text)
+        if not m:
+            return None
+        month, day, year = m.group(1), m.group(2), m.group(3)
+    # the word must be the start of a month name, 3+ letters: "Aug", "AUGUST", "Sept" - not "Augx"
+    word = month.lower()
+    month_no = next((i for i, name in enumerate(MONTH_NAMES, 1) if len(word) >= 3 and name.startswith(word)), None)
+    if not month_no:
+        return None
+    y = int(year)
+    if len(year) == 2:
+        y += 2000 if y <= 68 else 1900  # same rule as strptime's %y
+    try:
+        return datetime(y, month_no, int(day)).strftime("%Y-%m-%d")
+    except ValueError:
+        return ""
 
 
 def parse_amount(value):
